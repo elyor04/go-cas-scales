@@ -45,6 +45,20 @@ This package maps onto those modes as:
 defaults (9600 8N1, 22-byte CAS frame, device 0); override fields for a
 different model or Set Mode configuration.
 
+## Concurrency
+
+A `Client` is safe for concurrent use by multiple goroutines, including
+mixed concurrent calls to `Stream`, `RequestOne`, and the command-mode
+methods. The serial line itself is physically half-duplex — only one
+request/response (or one `Stream`) can ever be in flight on the wire — so
+`Client` serializes these internally: concurrent callers queue in FIFO
+order for exclusive access to the port rather than interleaving their
+bytes on it. A queued caller's `ctx` is honored while it waits, not just
+once its turn arrives, so a busy port surfaces as `ctx.Err()` instead of
+an indefinite block. `Stream` holds the port for its entire run, so
+`RequestOne`/command-mode calls issued while a `Stream` is active simply
+queue behind it (or time out via `ctx`).
+
 ## Notes worth reading before wiring this up
 
 - **The on-request byte and the command-mode frame are not the same

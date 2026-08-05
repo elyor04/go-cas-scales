@@ -1,6 +1,7 @@
 package cas
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"sync"
@@ -91,9 +92,11 @@ func newTestClient(opts DialOptions) (*Client, *fakePort) {
 		resolved.Format = Format22Byte
 	}
 	c := &Client{
-		port:     port,
-		opts:     resolved,
-		sessions: make(map[io_Closer]struct{}),
+		port:       port,
+		reader:     bufio.NewReader(port),
+		portTokens: newPortTokens(),
+		opts:       resolved,
+		sessions:   make(map[io_Closer]struct{}),
 	}
 	return c, port
 }

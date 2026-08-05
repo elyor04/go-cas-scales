@@ -90,14 +90,33 @@ func splitCRLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
 // the Client is closed, because the underlying Read call has no way to be
 // interrupted mid-block.
 //
-// Only one Stream should be running against a Client at a time; a second
-// concurrent Stream, RequestOne, or command-mode call will interleave reads
-// on the same port.
+// Stream holds the port for exclusive use for its entire run, acquired
+// before Stream returns: a concurrent RequestOne or command-mode call
+// queues behind it (or times out via its own ctx) rather than interleaving
+// reads on the same port. Likewise, Stream itself queues behind any
+// in-flight RequestOne/command-mode call, and behind a prior Stream that
+// hasn't finished shutting down; if ctx is done before the port becomes
+// free, Stream returns immediately-closed channels carrying ctx's error.
+// Only one Stream should be running against a Client at a time.
 func (c *Client) Stream(ctx context.Context) (<-chan Reading, <-chan error) {
 	readings := make(chan Reading, 16)
 	errs := make(chan error, 1)
 
 	if c.isClosed() {
+		errs <- opErr("Stream", ErrClosed)
+		close(readings)
+		close(errs)
+		return readings, errs
+	}
+
+	if err := c.acquirePort(ctx); err != nil {
+		errs <- opErr("Stream", err)
+		close(readings)
+		close(errs)
+		return readings, errs
+	}
+	if c.isClosed() {
+		c.releasePort()
 		errs <- opErr("Stream", ErrClosed)
 		close(readings)
 		close(errs)
@@ -110,11 +129,12 @@ func (c *Client) Stream(ctx context.Context) (<-chan Reading, <-chan error) {
 	go func() {
 		defer func() {
 			c.untrack(s)
+			c.releasePort()
 			close(readings)
 			close(errs)
 		}()
 
-		scanner := bufio.NewScanner(c.port)
+		scanner := bufio.NewScanner(c.reader)
 		scanner.Split(splitCRLF)
 
 		for scanner.Scan() {

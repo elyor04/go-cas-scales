@@ -1,6 +1,8 @@
 package cas
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"sync"
 
@@ -17,18 +19,53 @@ type io_Closer interface {
 
 // Client is a connection to one CAS CI-200-series indicator.
 //
-// A Client is safe for concurrent use by multiple goroutines, except that
-// RequestOne and the command-mode methods (Zero, Gross, Net, ...) share the
-// underlying port's read/write timeline with each other and with any
-// running Stream — issuing them concurrently will interleave their bytes
-// on the wire. Run at most one of Stream/RequestOne/a command method at a
-// time against a given Client.
+// A Client is safe for concurrent use by multiple goroutines, including
+// concurrent calls to RequestOne, the command-mode methods (Zero, Gross,
+// Net, ...), and Stream. The underlying serial line is physically
+// half-duplex — only one request/response (or one Stream) can ever be in
+// flight on the wire — so Client serializes these internally: concurrent
+// callers queue in FIFO order for exclusive access to the port rather than
+// interleaving their bytes on it. A queued caller's ctx is honored while it
+// waits, not just once its turn arrives, so a busy port surfaces as
+// ctx.Err() instead of an indefinite block. Stream holds the port for its
+// entire run, so RequestOne/command-mode calls issued while a Stream is
+// active simply queue behind it (or time out via ctx) — matching the fact
+// that Stream and RequestOne/command mode are different, mutually
+// exclusive device configurations (F31/F35) to begin with.
 type Client struct {
-	mu       sync.Mutex
-	port     serial.Port
-	opts     DialOptions
-	closed   bool
-	sessions map[io_Closer]struct{}
+	mu         sync.Mutex
+	port       serial.Port
+	reader     *bufio.Reader
+	portTokens chan struct{}
+	opts       DialOptions
+	closed     bool
+	sessions   map[io_Closer]struct{}
+}
+
+// newPortTokens returns a single-token channel used to serialize exclusive
+// access to the port: acquirePort receives the token, releasePort sends it
+// back.
+func newPortTokens() chan struct{} {
+	t := make(chan struct{}, 1)
+	t <- struct{}{}
+	return t
+}
+
+// acquirePort blocks until the port is free for exclusive use, or ctx is
+// done first. Every operation that reads or writes c.port must be
+// bracketed by acquirePort/releasePort (typically via defer) so concurrent
+// callers are serialized into one request/response at a time on the wire.
+func (c *Client) acquirePort(ctx context.Context) error {
+	select {
+	case <-c.portTokens:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) releasePort() {
+	c.portTokens <- struct{}{}
 }
 
 // Open opens the serial port named by opts.Port and returns a Client ready
@@ -62,9 +99,11 @@ func Open(opts DialOptions) (*Client, error) {
 	}
 
 	return &Client{
-		port:     port,
-		opts:     resolved,
-		sessions: make(map[io_Closer]struct{}),
+		port:       port,
+		reader:     bufio.NewReader(port),
+		portTokens: newPortTokens(),
+		opts:       resolved,
+		sessions:   make(map[io_Closer]struct{}),
 	}, nil
 }
 

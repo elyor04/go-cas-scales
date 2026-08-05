@@ -1,7 +1,6 @@
 package cas
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"time"
@@ -21,6 +20,13 @@ func (c *Client) RequestOne(ctx context.Context) (Reading, error) {
 	if c.isClosed() {
 		return Reading{}, opErr("RequestOne", ErrClosed)
 	}
+	if err := c.acquirePort(ctx); err != nil {
+		return Reading{}, opErr("RequestOne", err)
+	}
+	defer c.releasePort()
+	if c.isClosed() {
+		return Reading{}, opErr("RequestOne", ErrClosed)
+	}
 
 	timeout := c.opts.ReadTimeout
 	if dl, ok := ctx.Deadline(); ok {
@@ -36,7 +42,7 @@ func (c *Client) RequestOne(ctx context.Context) (Reading, error) {
 		return Reading{}, opErr("RequestOne", fmt.Errorf("write request byte: %w", err))
 	}
 
-	line, err := bufio.NewReader(c.port).ReadString('\n')
+	line, err := c.reader.ReadString('\n')
 	if err != nil && line == "" {
 		return Reading{}, opErr("RequestOne", fmt.Errorf("no data (timeout after %s): %w", timeout, err))
 	}

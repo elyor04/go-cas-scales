@@ -1,7 +1,6 @@
 package cas
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"strconv"
@@ -31,6 +30,13 @@ func (c *Client) SendCommand(ctx context.Context, code, data string) ([]byte, er
 	if c.isClosed() {
 		return nil, opErr("SendCommand", ErrClosed)
 	}
+	if err := c.acquirePort(ctx); err != nil {
+		return nil, opErr("SendCommand", err)
+	}
+	defer c.releasePort()
+	if c.isClosed() {
+		return nil, opErr("SendCommand", ErrClosed)
+	}
 
 	timeout := c.opts.ReadTimeout
 	if dl, ok := ctx.Deadline(); ok {
@@ -47,7 +53,7 @@ func (c *Client) SendCommand(ctx context.Context, code, data string) ([]byte, er
 		return nil, opErr("SendCommand", fmt.Errorf("write %q: %w", frame, err))
 	}
 
-	line, err := bufio.NewReader(c.port).ReadString('\n')
+	line, err := c.reader.ReadString('\n')
 	if err != nil && line == "" {
 		return nil, opErr("SendCommand", fmt.Errorf("no response to %q (timeout after %s): %w", code, timeout, err))
 	}
