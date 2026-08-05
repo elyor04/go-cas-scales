@@ -1,0 +1,99 @@
+package cas
+
+import (
+	"bytes"
+	"io"
+	"sync"
+	"time"
+
+	"go.bug.st/serial"
+)
+
+// fakePort is an in-memory serial.Port test double. toClient is what the
+// "indicator" sends and Client.Read reads from; fromClient captures what
+// Client.Write sends, so tests can assert on outgoing command frames
+// without any real hardware.
+type fakePort struct {
+	mu         sync.Mutex
+	toClient   *bytes.Buffer
+	fromClient bytes.Buffer
+	closed     bool
+	mode       *serial.Mode
+}
+
+func newFakePort(toClient string) *fakePort {
+	return &fakePort{toClient: bytes.NewBufferString(toClient)}
+}
+
+func (p *fakePort) SetMode(mode *serial.Mode) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.mode = mode
+	return nil
+}
+
+func (p *fakePort) Read(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return p.toClient.Read(b)
+}
+
+func (p *fakePort) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return p.fromClient.Write(b)
+}
+
+func (p *fakePort) written() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fromClient.String()
+}
+
+// feed appends more bytes for Read to hand back, as if the indicator kept
+// transmitting (used by streaming tests).
+func (p *fakePort) feed(s string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.toClient.WriteString(s)
+}
+
+func (p *fakePort) Drain() error             { return nil }
+func (p *fakePort) ResetInputBuffer() error  { return nil }
+func (p *fakePort) ResetOutputBuffer() error { return nil }
+func (p *fakePort) SetDTR(bool) error        { return nil }
+func (p *fakePort) SetRTS(bool) error        { return nil }
+func (p *fakePort) GetModemStatusBits() (*serial.ModemStatusBits, error) {
+	return &serial.ModemStatusBits{}, nil
+}
+func (p *fakePort) SetReadTimeout(time.Duration) error { return nil }
+func (p *fakePort) Break(time.Duration) error          { return nil }
+
+func (p *fakePort) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	return nil
+}
+
+// newTestClient builds a Client wired to a fakePort, bypassing Open (which
+// insists on a real OS port name) so tests can run without hardware.
+func newTestClient(opts DialOptions) (*Client, *fakePort) {
+	port := newFakePort("")
+	resolved := opts.resolved()
+	if resolved.Format.Parse == nil {
+		resolved.Format = Format22Byte
+	}
+	c := &Client{
+		port:     port,
+		opts:     resolved,
+		sessions: make(map[io_Closer]struct{}),
+	}
+	return c, port
+}
