@@ -37,8 +37,10 @@ type FrameFormat struct {
 //
 // The device ID sub-field is documented as 2 bytes but real hardware has
 // been observed sending it as raw binary rather than 2 ASCII digits (see
-// Reading.DeviceID); when that happens DeviceID is -1 but Value, Unit,
-// Stable, Net, and the lamp bits are still populated normally.
+// Reading.DeviceID); when that happens DeviceID recovers a best-effort
+// value from the raw byte if it's plausible, or -1 otherwise, while Value,
+// Unit, Stable, Net, and the lamp bits are still populated normally either
+// way.
 const (
 	name22Byte = "22-byte CAS"
 	minLen22   = 20 // 2+1+2+1+2+1+8+1+2, i.e. the frame minus its CR/LF
@@ -125,17 +127,25 @@ func parseCAS22(raw []byte) (Reading, error) {
 	}
 
 	// Real-hardware testing found at least one CI-200A that sends this
-	// field as raw binary (e.g. device 12 as the single byte 0x0C) rather
-	// than the 2 ASCII digits the manual's byte-count implies. Since the
-	// device ID is secondary to the weight/status payload, a field that
-	// doesn't parse as ASCII decimal degrades to the same -1 sentinel used
-	// when a format carries no device ID at all, instead of discarding an
-	// otherwise fully decodable Reading.
+	// field as raw binary rather than the 2 ASCII digits the manual's
+	// byte-count implies: the first byte tracked F26 exactly across every
+	// value tried (e.g. device 12 as the single byte 0x0C), while the
+	// second appeared to carry unrelated status-like information rather
+	// than being part of the ID. If the field doesn't parse as ASCII
+	// decimal, fall back to that raw-binary reading of the first byte when
+	// it falls within F26's documented 00-99 range — otherwise it's more
+	// likely line noise than a real ID, so DeviceID degrades to the same
+	// -1 sentinel used when a format carries no device ID at all. Either
+	// way the rest of an otherwise fully decodable Reading isn't discarded
+	// over this secondary field.
 	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		r.DeviceID = -1
-	} else {
+	switch {
+	case err == nil:
 		r.DeviceID = id
+	case int(idStr[0]) <= 99:
+		r.DeviceID = int(idStr[0])
+	default:
+		r.DeviceID = -1
 	}
 
 	weightStr, lampByte, unit := rest[0:8], rest[8], rest[9:11]

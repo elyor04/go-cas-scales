@@ -91,21 +91,37 @@ func TestParseCAS22Errors(t *testing.T) {
 	}
 }
 
-func TestParseCAS22NonASCIIDeviceIDFallsBackToNegativeOne(t *testing.T) {
+func TestParseCAS22NonASCIIDeviceIDFallsBackToRawBinary(t *testing.T) {
 	// Real hardware (see cas/frame.go doc comment) has been observed
-	// sending this sub-field as raw binary rather than 2 ASCII digits.
-	// The rest of the frame must still decode instead of the whole
-	// Reading being discarded over an unparseable device ID.
+	// sending this sub-field as raw binary rather than 2 ASCII digits,
+	// with the first byte matching F26 exactly (device 3 as byte 0x03,
+	// straight from a real capture). The rest of the frame must still
+	// decode instead of the whole Reading being discarded, and DeviceID
+	// should recover 3 from the raw byte rather than giving up to -1.
 	content := "ST,GS," + string([]byte{0x03, 0xC4}) + ",000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"
 	r, err := parseCAS22([]byte(content))
 	if err != nil {
-		t.Fatalf("parseCAS22(%q) error = %v, want a successful decode with DeviceID=-1", content, err)
+		t.Fatalf("parseCAS22(%q) error = %v, want a successful decode", content, err)
 	}
-	if r.DeviceID != -1 {
-		t.Errorf("DeviceID = %d, want -1 for a non-ASCII device-ID field", r.DeviceID)
+	if r.DeviceID != 3 {
+		t.Errorf("DeviceID = %d, want 3 recovered from the raw first byte 0x03", r.DeviceID)
 	}
 	if r.Value != 13.5 || r.Unit != "kg" || !r.Stable {
-		t.Errorf("parseCAS22(%q) = %+v, want Value=13.5 Unit=kg Stable=true despite the bad device ID", content, r)
+		t.Errorf("parseCAS22(%q) = %+v, want Value=13.5 Unit=kg Stable=true despite the non-ASCII device ID", content, r)
+	}
+}
+
+func TestParseCAS22ImplausibleDeviceIDByteFallsBackToNegativeOne(t *testing.T) {
+	// A first byte outside F26's documented 00-99 range doesn't look like
+	// a real device ID at all (more likely line noise), so DeviceID must
+	// fall all the way back to -1 rather than reporting a bogus value.
+	content := "ST,GS," + string([]byte{0xFF, 0xC4}) + ",000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"
+	r, err := parseCAS22([]byte(content))
+	if err != nil {
+		t.Fatalf("parseCAS22(%q) error = %v, want a successful decode", content, err)
+	}
+	if r.DeviceID != -1 {
+		t.Errorf("DeviceID = %d, want -1 for an implausible (>99) raw device-ID byte", r.DeviceID)
 	}
 }
 

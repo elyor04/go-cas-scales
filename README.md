@@ -98,6 +98,14 @@ port, even though the call that gave up on it returned promptly.
   weight frame. `KeyTareValue`/`HighLimit`/`LowLimit` cope by extracting the
   trailing numeric run from whatever comes back — verify this against real
   hardware before depending on it.
+- **`Format22Byte`'s device-ID sub-field has been observed as raw binary on
+  real hardware**, not the 2 ASCII digits the manual's byte-count implies —
+  confirmed against a physical CI-200A, where the first byte tracked F26
+  exactly (e.g. device 12 as `0x0C`). `Reading.DeviceID` recovers a
+  best-effort value from that raw byte when it's a plausible F26 value
+  (00-99), or -1 otherwise; `Value`/`Unit`/`Stable`/`Net`/lamp bits decode
+  normally either way. This was seen on one unit, not verified across the
+  whole CI-200 line — worth confirming against your own hardware.
 
 ## Package layout
 

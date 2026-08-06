@@ -39,8 +39,10 @@ type Reading struct {
 	// DeviceID is the indicator's F26 device ID as sent in the frame, or
 	// -1 if the active FrameFormat doesn't carry one. Format22Byte also
 	// falls back to -1 if its device-ID sub-field doesn't parse as ASCII
-	// decimal (some real-world firmware sends it as raw binary instead);
-	// the rest of the Reading is still populated normally in that case.
+	// decimal and no plausible raw-binary reading can be recovered from it
+	// either (some real-world firmware sends this field as raw binary
+	// instead of ASCII — see Format22Byte); the rest of the Reading is
+	// still populated normally in either case.
 	DeviceID int
 	// Raw is the frame text (with any trailing CR/LF stripped) that
 	// produced this Reading, kept around for logging/debugging.
