@@ -155,6 +155,72 @@ func TestStreamRespectsContextWhilePortBusy(t *testing.T) {
 	}
 }
 
+// TestRequestOneReturnsAtTimeoutEvenIfUnderlyingReadIsStuck reproduces what
+// real-hardware testing found: on at least one platform/driver combination,
+// the underlying port's Read call didn't honor SetReadTimeout when the
+// indicator stayed silent, blocking for minutes instead of the configured
+// duration. RequestOne must still return control to the caller by its own
+// timeout regardless of what the underlying read does.
+func TestRequestOneReturnsAtTimeoutEvenIfUnderlyingReadIsStuck(t *testing.T) {
+	c, _ := newBlockingTestClient(DialOptions{ReadTimeout: 50 * time.Millisecond}, 2*time.Second)
+
+	start := time.Now()
+	_, err := c.RequestOne(context.Background())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("RequestOne() succeeded, want a timeout error")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("RequestOne() blocked for %s, want it bounded by the 50ms ReadTimeout despite the stuck underlying read", elapsed)
+	}
+}
+
+// TestSendCommandReturnsAtTimeoutEvenIfUnderlyingReadIsStuck is
+// TestRequestOneReturnsAtTimeoutEvenIfUnderlyingReadIsStuck's counterpart
+// for the command-mode path.
+func TestSendCommandReturnsAtTimeoutEvenIfUnderlyingReadIsStuck(t *testing.T) {
+	c, _ := newBlockingTestClient(DialOptions{ReadTimeout: 50 * time.Millisecond}, 2*time.Second)
+
+	start := time.Now()
+	_, err := c.SendCommand(context.Background(), "KW", "")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("SendCommand() succeeded, want a timeout error")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("SendCommand() blocked for %s, want it bounded by the 50ms ReadTimeout despite the stuck underlying read", elapsed)
+	}
+}
+
+// TestRequestOnePortStaysBusyUntilAbandonedReadCompletes documents the
+// tradeoff that comes with the fix above: since the stuck OS-level read
+// can't be forcibly interrupted without closing the port out from under
+// other callers, the port isn't actually free the instant a timed-out
+// caller returns — a queued caller waits for the abandoned read to
+// complete too, exactly as RequestOne's doc comment describes.
+func TestRequestOnePortStaysBusyUntilAbandonedReadCompletes(t *testing.T) {
+	c, _ := newBlockingTestClient(DialOptions{ReadTimeout: 50 * time.Millisecond}, 300*time.Millisecond)
+
+	start := time.Now()
+	if _, err := c.RequestOne(context.Background()); err == nil {
+		t.Fatal("first RequestOne() succeeded, want a timeout error")
+	}
+	if firstElapsed := time.Since(start); firstElapsed > 500*time.Millisecond {
+		t.Fatalf("first RequestOne() took %s, want it bounded by ReadTimeout", firstElapsed)
+	}
+
+	// Issued immediately after, this should queue behind the port until
+	// the first call's abandoned read finally releases it around 300ms.
+	if _, err := c.RequestOne(context.Background()); err == nil {
+		t.Fatal("second RequestOne() succeeded, want a timeout error (no data was ever queued)")
+	}
+	if totalElapsed := time.Since(start); totalElapsed < 200*time.Millisecond {
+		t.Errorf("second RequestOne() returned after %s total, want it to have waited for the first call's abandoned read (~300ms) to release the port", totalElapsed)
+	}
+}
+
 // TestRequestOneQueuesBehindActiveStreamThenRuns checks that a RequestOne
 // issued while a Stream holds the port doesn't error or corrupt the wire —
 // it simply waits its turn, matching the documented "Stream holds the port

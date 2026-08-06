@@ -91,6 +91,24 @@ func TestParseCAS22Errors(t *testing.T) {
 	}
 }
 
+func TestParseCAS22NonASCIIDeviceIDFallsBackToNegativeOne(t *testing.T) {
+	// Real hardware (see cas/frame.go doc comment) has been observed
+	// sending this sub-field as raw binary rather than 2 ASCII digits.
+	// The rest of the frame must still decode instead of the whole
+	// Reading being discarded over an unparseable device ID.
+	content := "ST,GS," + string([]byte{0x03, 0xC4}) + ",000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"
+	r, err := parseCAS22([]byte(content))
+	if err != nil {
+		t.Fatalf("parseCAS22(%q) error = %v, want a successful decode with DeviceID=-1", content, err)
+	}
+	if r.DeviceID != -1 {
+		t.Errorf("DeviceID = %d, want -1 for a non-ASCII device-ID field", r.DeviceID)
+	}
+	if r.Value != 13.5 || r.Unit != "kg" || !r.Stable {
+		t.Errorf("parseCAS22(%q) = %+v, want Value=13.5 Unit=kg Stable=true despite the bad device ID", content, r)
+	}
+}
+
 func TestParseCAS22ShortFrameWrapsErrShortFrame(t *testing.T) {
 	_, err := parseCAS22([]byte("ST,GS,01"))
 	if !errors.Is(err, ErrShortFrame) {

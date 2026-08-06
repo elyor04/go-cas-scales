@@ -59,6 +59,17 @@ an indefinite block. `Stream` holds the port for its entire run, so
 `RequestOne`/command-mode calls issued while a `Stream` is active simply
 queue behind it (or time out via `ctx`).
 
+`RequestOne` and the command-mode methods always return control to the
+caller by `DialOptions.ReadTimeout` (or `ctx`'s deadline, if sooner) — this
+is enforced independently of the underlying port's own read timeout, since
+real-hardware testing found at least one platform/driver combination that
+doesn't honor it reliably when the indicator stays silent. If the
+underlying read is still outstanding when that deadline passes, the port
+itself stays held until it eventually completes in the background — an OS
+read call can't be forcibly interrupted without closing the port out from
+under any other caller — so a queued call may still wait that long for the
+port, even though the call that gave up on it returned promptly.
+
 ## Notes worth reading before wiring this up
 
 - **The on-request byte and the command-mode frame are not the same

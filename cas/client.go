@@ -32,6 +32,13 @@ type io_Closer interface {
 // active simply queue behind it (or time out via ctx) — matching the fact
 // that Stream and RequestOne/command mode are different, mutually
 // exclusive device configurations (F31/F35) to begin with.
+//
+// RequestOne and the command-mode methods always return control to their
+// own caller by DialOptions.ReadTimeout (or ctx's deadline, if sooner),
+// independent of whether the underlying port's read timeout is actually
+// honored — see RequestOne's doc comment. If that underlying read is still
+// outstanding when the deadline passes, the port stays held until it
+// completes in the background, so a queued caller may still wait for it.
 type Client struct {
 	mu         sync.Mutex
 	port       serial.Port

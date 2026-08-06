@@ -36,8 +36,11 @@ type Reading struct {
 	// AtZero reports the indicator's Zero-point lamp bit. Only
 	// populated by Format22Byte.
 	AtZero bool
-	// DeviceID is the indicator's F26 device ID as sent in the frame,
-	// or -1 if the active FrameFormat doesn't carry one.
+	// DeviceID is the indicator's F26 device ID as sent in the frame, or
+	// -1 if the active FrameFormat doesn't carry one. Format22Byte also
+	// falls back to -1 if its device-ID sub-field doesn't parse as ASCII
+	// decimal (some real-world firmware sends it as raw binary instead);
+	// the rest of the Reading is still populated normally in that case.
 	DeviceID int
 	// Raw is the frame text (with any trailing CR/LF stripped) that
 	// produced this Reading, kept around for logging/debugging.

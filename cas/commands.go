@@ -12,6 +12,10 @@ import (
 // "D<deviceID><code><data>\r\n" request frame (Set Mode F31/F35 = 4,
 // COM1 only), writes it, and returns whatever the indicator sends back
 // before DialOptions.ReadTimeout (or ctx's deadline, if sooner) expires.
+// As with RequestOne, that bound is enforced independently of the
+// underlying port's own read timeout — see RequestOne's doc comment for
+// why, and for the port-stays-busy tradeoff that implies if the indicator
+// never answers.
 //
 // It exists as an escape hatch for command codes not wrapped by a named
 // method below — most notably KT, which the manual lists as "Zero Point
@@ -33,8 +37,8 @@ func (c *Client) SendCommand(ctx context.Context, code, data string) ([]byte, er
 	if err := c.acquirePort(ctx); err != nil {
 		return nil, opErr("SendCommand", err)
 	}
-	defer c.releasePort()
 	if c.isClosed() {
+		c.releasePort()
 		return nil, opErr("SendCommand", ErrClosed)
 	}
 
@@ -45,17 +49,19 @@ func (c *Client) SendCommand(ctx context.Context, code, data string) ([]byte, er
 		}
 	}
 	if err := c.port.SetReadTimeout(timeout); err != nil {
+		c.releasePort()
 		return nil, opErr("SendCommand", err)
 	}
 
 	frame := fmt.Sprintf("D%02d%s%s\r\n", c.opts.DeviceID, code, data)
 	if _, err := c.port.Write([]byte(frame)); err != nil {
+		c.releasePort()
 		return nil, opErr("SendCommand", fmt.Errorf("write %q: %w", frame, err))
 	}
 
-	line, err := c.reader.ReadString('\n')
-	if err != nil && line == "" {
-		return nil, opErr("SendCommand", fmt.Errorf("no response to %q (timeout after %s): %w", code, timeout, err))
+	line, err := c.readLineBounded(ctx, timeout)
+	if err != nil {
+		return nil, opErr("SendCommand", fmt.Errorf("no response to %q: %w", code, err))
 	}
 	return []byte(line), nil
 }

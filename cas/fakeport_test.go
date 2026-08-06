@@ -100,3 +100,37 @@ func newTestClient(opts DialOptions) (*Client, *fakePort) {
 	}
 	return c, port
 }
+
+// blockingReadPort wraps a fakePort but makes Read block for a fixed
+// duration regardless of whatever SetReadTimeout configured, reproducing
+// what real-hardware testing found on Windows when the indicator never
+// answers a request: the underlying read outlives the configured timeout
+// by a large margin instead of respecting it.
+type blockingReadPort struct {
+	*fakePort
+	blockFor time.Duration
+}
+
+func (p *blockingReadPort) Read(b []byte) (int, error) {
+	time.Sleep(p.blockFor)
+	return p.fakePort.Read(b)
+}
+
+// newBlockingTestClient is newTestClient's counterpart for tests that need
+// a Read call the configured ReadTimeout can't actually bound at the port
+// level, to verify Client enforces it independently at the ctx/Go level.
+func newBlockingTestClient(opts DialOptions, blockFor time.Duration) (*Client, *blockingReadPort) {
+	port := &blockingReadPort{fakePort: newFakePort(""), blockFor: blockFor}
+	resolved := opts.resolved()
+	if resolved.Format.Parse == nil {
+		resolved.Format = Format22Byte
+	}
+	c := &Client{
+		port:       port,
+		reader:     bufio.NewReader(port),
+		portTokens: newPortTokens(),
+		opts:       resolved,
+		sessions:   make(map[io_Closer]struct{}),
+	}
+	return c, port
+}

@@ -34,6 +34,11 @@ type FrameFormat struct {
 // and, for negative readings, a leading '-' (e.g. "13.5" kg is sent as
 // "000013.5" — see the manual's own worked example), so it can be handed
 // straight to strconv.ParseFloat once trimmed.
+//
+// The device ID sub-field is documented as 2 bytes but real hardware has
+// been observed sending it as raw binary rather than 2 ASCII digits (see
+// Reading.DeviceID); when that happens DeviceID is -1 but Value, Unit,
+// Stable, Net, and the lamp bits are still populated normally.
 const (
 	name22Byte = "22-byte CAS"
 	minLen22   = 20 // 2+1+2+1+2+1+8+1+2, i.e. the frame minus its CR/LF
@@ -119,11 +124,19 @@ func parseCAS22(raw []byte) (Reading, error) {
 		return Reading{}, fmt.Errorf("%s: unexpected weight-type field %q", name22Byte, wtype)
 	}
 
+	// Real-hardware testing found at least one CI-200A that sends this
+	// field as raw binary (e.g. device 12 as the single byte 0x0C) rather
+	// than the 2 ASCII digits the manual's byte-count implies. Since the
+	// device ID is secondary to the weight/status payload, a field that
+	// doesn't parse as ASCII decimal degrades to the same -1 sentinel used
+	// when a format carries no device ID at all, instead of discarding an
+	// otherwise fully decodable Reading.
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		return Reading{}, fmt.Errorf("%s: device ID %q: %w", name22Byte, idStr, err)
+		r.DeviceID = -1
+	} else {
+		r.DeviceID = id
 	}
-	r.DeviceID = id
 
 	weightStr, lampByte, unit := rest[0:8], rest[8], rest[9:11]
 	v, err := strconv.ParseFloat(strings.TrimSpace(weightStr), 64)
