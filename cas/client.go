@@ -41,7 +41,7 @@ type io_Closer interface {
 // completes in the background, so a queued caller may still wait for it.
 type Client struct {
 	mu         sync.Mutex
-	port       serial.Port
+	port       Transport
 	reader     *bufio.Reader
 	portTokens chan struct{}
 	opts       DialOptions
@@ -79,18 +79,13 @@ func (c *Client) releasePort() {
 // to read from it. See DefaultOptions for the documented zero-value
 // defaults applied to opts.
 func Open(opts DialOptions) (*Client, error) {
-	resolved := opts.resolved()
-	switch {
-	case resolved.Format.Parse != nil:
-		// caller supplied a preset or a fully-built custom format
-	case resolved.Format.Name == "" && resolved.Format.MinLen == 0:
-		resolved.Format = Format22Byte // untouched zero value: use the default
-	default:
-		return nil, opErr("Open", ErrUnpopulatedFormat)
+	resolved, err := resolveFormat("Open", opts)
+	if err != nil {
+		return nil, err
 	}
 
 	dataBits := 8
-	if resolved.Parity != serial.NoParity {
+	if resolved.Parity != NoParity {
 		dataBits = 7
 	}
 	mode := &serial.Mode{
@@ -105,13 +100,33 @@ func Open(opts DialOptions) (*Client, error) {
 		return nil, opErr("Open", fmt.Errorf("open %s: %w", resolved.Port, err))
 	}
 
+	return newClient(port, resolved), nil
+}
+
+// newClient wraps an open transport. opts must already be resolved.
+func newClient(port Transport, opts DialOptions) *Client {
 	return &Client{
 		port:       port,
 		reader:     bufio.NewReader(port),
 		portTokens: newPortTokens(),
-		opts:       resolved,
+		opts:       opts,
 		sessions:   make(map[io_Closer]struct{}),
-	}, nil
+	}
+}
+
+// resolveFormat applies Open's rule for DialOptions.Format: the untouched
+// zero value means Format22Byte, and a caller-built format must carry a
+// Parse func.
+func resolveFormat(op string, opts DialOptions) (DialOptions, error) {
+	resolved := opts.resolved()
+	switch {
+	case resolved.Format.Parse != nil:
+	case resolved.Format.Name == "" && resolved.Format.MinLen == 0:
+		resolved.Format = Format22Byte
+	default:
+		return resolved, opErr(op, ErrUnpopulatedFormat)
+	}
+	return resolved, nil
 }
 
 // DeviceID returns the F26 device ID this Client was configured with.

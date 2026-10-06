@@ -13,6 +13,19 @@ const (
 	DefaultReadTimeout = 2 * time.Second
 )
 
+// Parity is the serial parity setting (the indicator's F27). It is
+// go.bug.st/serial's own type, re-exported so a caller can set
+// DialOptions.Parity without importing that package; serial.EvenParity and
+// the rest remain interchangeable with the constants below.
+type Parity = serial.Parity
+
+// The parities a CAS indicator supports (F27 = 0, 1, 2).
+const (
+	NoParity   Parity = serial.NoParity   // F27=0: 8 data bits, no parity (factory default)
+	EvenParity Parity = serial.EvenParity // F27=1: 7 data bits, even parity
+	OddParity  Parity = serial.OddParity  // F27=2: 7 data bits, odd parity
+)
+
 // DialOptions configures a Client. Every field's zero value is a documented,
 // sane default — there is no functional-options pattern here, just a plain
 // struct.
@@ -28,12 +41,11 @@ type DialOptions struct {
 	// (9600, the indicator's F28/F32 factory default).
 	BaudRate int
 
-	// Parity is the serial parity setting. The zero value,
-	// serial.NoParity, matches the indicator's F27=0 factory default
-	// (8 data bits, no parity, 1 stop bit). Set serial.EvenParity or
-	// serial.OddParity to match F27=1/2 (7 data bits) — required when
-	// using Format18ByteAND.
-	Parity serial.Parity
+	// Parity is the serial parity setting. The zero value, NoParity,
+	// matches the indicator's F27=0 factory default (8 data bits, no
+	// parity, 1 stop bit). Set EvenParity or OddParity to match F27=1/2
+	// (7 data bits) — required when using Format18ByteAND.
+	Parity Parity
 
 	// Format selects how received frames are decoded. The zero value is
 	// treated as Format22Byte (F30/F34=0, the indicator's default
@@ -73,7 +85,7 @@ func (opts DialOptions) resolved() DialOptions {
 //	opts := cas.DefaultOptions("COM3")
 //	opts.Model = cas.ModelCI201A
 //	opts.Format = cas.Format18ByteAND
-//	opts.Parity = serial.EvenParity
+//	opts.Parity = cas.EvenParity
 func DefaultOptions(port string) DialOptions {
 	return DialOptions{
 		Port:     port,

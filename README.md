@@ -19,6 +19,19 @@ family sharing an identical serial protocol. The frame-decoding layer
 serial-interface formats, and a caller can plug in a fully custom
 `FrameFormat` for a different indicator entirely.
 
+## Over TCP/IP
+
+`cas.OpenTCP("192.168.1.50:4001", opts)` reads the same frames from a TCP
+connection instead of a serial port: an indicator behind a serial-to-Ethernet
+converter in transparent (raw TCP server) mode, or one with its own Ethernet
+option. `opts` is used exactly as `Open` uses it, except that `Port`,
+`BaudRate` and `Parity` are ignored -- those are the converter's settings.
+The connection's read timeout behaves like a serial port's (a timed-out read
+returns no data rather than an error), so `Stream`, `RequestOne` and the
+command-mode methods work unchanged. A dropped connection surfaces as an error
+on `Stream`'s error channel, as an unplugged cable does; reconnecting is the
+caller's job. `cas.OpenTransport` takes any other `cas.Transport`.
+
 ## Protocol summary
 
 The indicator's Set Mode exposes the function codes that matter here:
@@ -26,7 +39,7 @@ The indicator's Set Mode exposes the function codes that matter here:
 | Code | Meaning |
 |---|---|
 | F26 | Device ID (00-99) |
-| F27 | Parity: 0 = 8N1 (default), 1 = 7E1, 2 = 7O1 |
+| F27 | Parity: 0 = 8N1 (default), 1 = 7E1, 2 = 7O1 — `cas.NoParity` / `cas.EvenParity` / `cas.OddParity` |
 | F28 / F32 | Baud rate for COM1 / COM2 (default 9600) |
 | F30 / F34 | Frame format for COM1 / COM2: 0 = 22-byte CAS, 1 = 10-byte CAS, 2 = 18-byte AND |
 | F31 / F35 | Output mode for COM1 / COM2: 0 = off, 1 = stream always, 2 = stream when stable, 3 = send on request, 4 = command mode (COM1 only) |
