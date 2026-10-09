@@ -3,6 +3,7 @@ package cas
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -10,10 +11,8 @@ import (
 // "D<deviceID><code><data>\r\n" request frame (Set Mode F31 = 4, COM1
 // only), writes it, and returns whatever the indicator sends back
 // before DialOptions.ReadTimeout (or ctx's deadline, if sooner) expires.
-// As with RequestOne, that bound is enforced independently of the
-// underlying port's own read timeout — see RequestOne's doc comment for
-// why, and for the port-stays-busy tradeoff that implies if the indicator
-// never answers.
+// The timeout and the discarding of earlier input work as for RequestOne;
+// see its doc comment.
 //
 // It exists as an escape hatch for command codes not wrapped by a named
 // method below — most notably KT, which the manual lists as "Zero Point
@@ -47,6 +46,10 @@ func (c *Client) SendCommand(ctx context.Context, code, data string) ([]byte, er
 	if err := c.port.SetReadTimeout(timeout); err != nil {
 		c.releasePort()
 		return nil, opErr("SendCommand", err)
+	}
+	if err := c.discardInput(); err != nil {
+		c.releasePort()
+		return nil, opErr("SendCommand", fmt.Errorf("discard stale input: %w", err))
 	}
 
 	frame := fmt.Sprintf("D%02d%s%s\r\n", c.opts.DeviceID, code, data)
@@ -127,7 +130,11 @@ func (c *Client) KeyTareValue(ctx context.Context) (float64, error) {
 // SetKeyTareValue writes the indicator's key-tare value (command code HY).
 // See limitField for how v is encoded.
 func (c *Client) SetKeyTareValue(ctx context.Context, v float64) error {
-	_, err := c.SendCommand(ctx, "HY", limitField(v))
+	field, err := limitField(v)
+	if err != nil {
+		return opErr("SetKeyTareValue", err)
+	}
+	_, err = c.SendCommand(ctx, "HY", field)
 	return opErr("SetKeyTareValue", err)
 }
 
@@ -162,7 +169,11 @@ func (c *Client) SetHighLimit(ctx context.Context, v float64) error {
 	if !c.opts.Model.SupportsLimits() {
 		return opErr("SetHighLimit", ErrUnsupportedByModel)
 	}
-	_, err := c.SendCommand(ctx, "HI", limitField(v))
+	field, err := limitField(v)
+	if err != nil {
+		return opErr("SetHighLimit", err)
+	}
+	_, err = c.SendCommand(ctx, "HI", field)
 	return opErr("SetHighLimit", err)
 }
 
@@ -172,7 +183,11 @@ func (c *Client) SetLowLimit(ctx context.Context, v float64) error {
 	if !c.opts.Model.SupportsLimits() {
 		return opErr("SetLowLimit", ErrUnsupportedByModel)
 	}
-	_, err := c.SendCommand(ctx, "HL", limitField(v))
+	field, err := limitField(v)
+	if err != nil {
+		return opErr("SetLowLimit", err)
+	}
+	_, err = c.SendCommand(ctx, "HL", field)
 	return opErr("SetLowLimit", err)
 }
 
@@ -180,7 +195,12 @@ func (c *Client) SetLowLimit(ctx context.Context, v float64) error {
 // doesn't fully specify it (a related command table notes only "DATA (Not
 // include decimal point)"); this sends v rounded to the nearest whole unit,
 // zero-padded. Verify against real hardware before relying on it for
-// non-integer values.
-func limitField(v float64) string {
-	return fmt.Sprintf("%05d", int64(v+0.5))
+// non-integer values. A value that rounds outside 0-99999 doesn't fit the
+// field and is an error: it used to go out as "-0004" or as six digits.
+func limitField(v float64) (string, error) {
+	n := math.Round(v)
+	if !(n >= 0 && n <= 99999) {
+		return "", fmt.Errorf("value %v does not fit the 5-digit field (0-99999)", v)
+	}
+	return fmt.Sprintf("%05d", int64(n)), nil
 }

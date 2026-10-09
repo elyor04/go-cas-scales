@@ -98,15 +98,19 @@ an indefinite block. `Stream` holds the port for its entire run, so
 queue behind it (or time out via `ctx`).
 
 `RequestOne` and the command-mode methods always return control to the
-caller by `DialOptions.ReadTimeout` (or `ctx`'s deadline, if sooner) — this
-is enforced independently of the underlying port's own read timeout, since
-real-hardware testing found at least one platform/driver combination that
-doesn't honor it reliably when the indicator stays silent. If the
-underlying read is still outstanding when that deadline passes, the port
-itself stays held until it eventually completes in the background — an OS
-read call can't be forcibly interrupted without closing the port out from
-under any other caller — so a queued call may still wait that long for the
-port, even though the call that gave up on it returned promptly.
+caller by `DialOptions.ReadTimeout` (or `ctx`'s deadline, if sooner), and
+the port is free again at the same point. Before each request they discard
+anything already received, so a reply that arrives after its request timed
+out is never taken as the next request's answer. With a custom `Transport`
+whose `Read` ignores `SetReadTimeout`, the caller still gets control back on
+time, but the port stays held until that read completes.
+
+Before 1.2.1 a silent indicator held the port for 100 × `ReadTimeout`
+(200 s at the default) after the caller had already timed out: `bufio`
+retried each timed-out read, which returns no data and no error, 100 times.
+That is what earlier versions described as a driver that doesn't honor the
+read timeout. The same retries ended a `Stream` started after a request
+once the line had been idle that long.
 
 ## Notes worth reading before wiring this up
 
@@ -137,7 +141,8 @@ port, even though the call that gave up on it returned promptly.
   and `LowLimit` did exactly that before 1.2.0; they are now deprecated and
   return `ErrNoReadCommand` without touching the wire. The 5-digit encoding
   the setters use (the value rounded to whole units) isn't fully specified
-  either — verify it on real hardware for non-integer values.
+  either — verify it on real hardware for non-integer values. A value that
+  rounds outside 0-99999 is an error.
 - **The manual has a few typos worth knowing about**: §11-3-1 says "F30 and
   F35" for the output mode where it means F31/F35, and the F47/F48 tables
   are labelled "F45".
@@ -151,6 +156,7 @@ cas/
   reading.go    Reading, the decoded-frame value type
   config.go     DialOptions, DefaultOptions
   client.go     Client, Open, Close
+  transport.go  Transport, OpenTransport, OpenTCP
   stream.go     Client.Stream (continuous read)
   request.go    Client.RequestOne (on-request read)
   commands.go   Command-mode methods (Zero, Gross, Net, ..., SendCommand)

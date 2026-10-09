@@ -2,6 +2,7 @@ package cas
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -142,6 +143,28 @@ func TestStreamCloseDoesNotPanicOrRace(t *testing.T) {
 
 	close(stopFeed)
 	wg.Wait()
+}
+
+// TestStreamEndingOnItsOwnLeavesNoGoroutine: the goroutine watching ctx
+// used to outlive a stream that ended on a read error, until ctx was
+// cancelled -- with context.Background(), for good.
+func TestStreamEndingOnItsOwnLeavesNoGoroutine(t *testing.T) {
+	before := runtime.NumGoroutine()
+	for range 20 {
+		c, _ := newTestClient(DialOptions{})
+		readings, errs := c.Stream(context.Background()) // the empty fake ends it with EOF
+		for range readings {
+		}
+		for range errs {
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > before {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines: %d before, %d after 20 finished streams", before, runtime.NumGoroutine())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestStreamOnClosedClientReturnsClosedChannels(t *testing.T) {

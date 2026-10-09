@@ -3,6 +3,7 @@ package cas
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -122,6 +123,137 @@ func TestTCPTransport_TimeoutReadsLikeSerial(t *testing.T) {
 	n, err := tr.Read(make([]byte, 8))
 	if n != 0 || err != nil {
 		t.Fatalf("Read after timeout = (%d, %v), want (0, nil) as a serial port gives", n, err)
+	}
+}
+
+// scriptedIndicator accepts one connection and runs serve on it.
+func scriptedIndicator(t *testing.T, serve func(conn net.Conn)) (addr string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		serve(conn)
+	}()
+	return ln.Addr().String()
+}
+
+// silentUntil keeps a connection open without sending anything until done.
+func silentUntil(done <-chan struct{}) func(net.Conn) {
+	return func(net.Conn) { <-done }
+}
+
+// TestRequestOne_TimeoutFreesThePort is the regression test for a timed-out
+// read reaching bufio as (0, nil): bufio retried it 100 times, so the port
+// stayed busy for 100x ReadTimeout (200s at the default) after the caller
+// had already been told it timed out, and the next request waited that long.
+func TestRequestOne_TimeoutFreesThePort(t *testing.T) {
+	done := make(chan struct{})
+	defer close(done)
+	c, err := OpenTCP(scriptedIndicator(t, silentUntil(done)), DialOptions{ReadTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("OpenTCP: %v", err)
+	}
+	defer c.Close()
+
+	for i := range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		start := time.Now()
+		_, err := c.RequestOne(ctx)
+		elapsed := time.Since(start)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RequestOne #%d error = %v, want a timeout", i+1, err)
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Fatalf("RequestOne #%d took %s, want about the 20ms ReadTimeout", i+1, elapsed)
+		}
+	}
+}
+
+// TestRequestOne_IgnoresALateReply: once a timed-out read really ends at the
+// timeout, a reply arriving after it waits in the input buffer, and without
+// the discard before each request it was read as the next request's answer.
+func TestRequestOne_IgnoresALateReply(t *testing.T) {
+	addr := scriptedIndicator(t, func(conn net.Conn) {
+		r := bufio.NewReader(conn)
+		for i := 1; ; i++ {
+			if _, err := r.ReadByte(); err != nil {
+				return
+			}
+			if i == 1 {
+				time.Sleep(150 * time.Millisecond) // answers after RequestOne gave up
+			}
+			if _, err := conn.Write([]byte(frame22(float64(i)) + "\r\n")); err != nil {
+				return
+			}
+		}
+	})
+	c, err := OpenTCP(addr, DialOptions{ReadTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("OpenTCP: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.RequestOne(context.Background()); err == nil {
+		t.Fatal("RequestOne #1 succeeded, want a timeout")
+	}
+	time.Sleep(250 * time.Millisecond) // the late reply to #1 is in by now
+
+	r, err := c.RequestOne(context.Background())
+	if err != nil {
+		t.Fatalf("RequestOne #2: %v", err)
+	}
+	if r.Value != 2 {
+		t.Fatalf("RequestOne #2 = %v, want 2 (got the late reply to #1)", r.Value)
+	}
+}
+
+// TestStream_SurvivesAnIdleLineAfterARequest: Stream used to keep the read
+// timeout RequestOne had set, and an idle line then ended it with
+// io.ErrNoProgress after 100 empty reads.
+func TestStream_SurvivesAnIdleLineAfterARequest(t *testing.T) {
+	send := make(chan string)
+	addr := scriptedIndicator(t, func(conn net.Conn) {
+		for f := range send {
+			if _, err := conn.Write([]byte(f + "\r\n")); err != nil {
+				return
+			}
+		}
+	})
+	c, err := OpenTCP(addr, DialOptions{ReadTimeout: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("OpenTCP: %v", err)
+	}
+	defer c.Close()
+	if _, err := c.RequestOne(context.Background()); err == nil {
+		t.Fatal("RequestOne succeeded against a silent indicator")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	readings, errs := c.Stream(ctx)
+
+	time.Sleep(1200 * time.Millisecond) // over 100 empty reads at 5ms, twice over
+	send <- frame22(13.5)
+	close(send)
+
+	select {
+	case r, ok := <-readings:
+		if !ok || r.Value != 13.5 {
+			t.Fatalf("reading = %+v (open %v), want 13.5", r, ok)
+		}
+	case err := <-errs:
+		t.Fatalf("stream ended on the idle line: %v", err)
+	case <-ctx.Done():
+		t.Fatal("no reading within 5s")
 	}
 }
 

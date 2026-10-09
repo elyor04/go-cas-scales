@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -19,15 +20,15 @@ import (
 //
 // The call is bounded by DialOptions.ReadTimeout, shortened to ctx's
 // deadline if ctx has one and it's sooner: RequestOne always returns
-// control to the caller by then. This is enforced independently of the
-// underlying port's read timeout, which real-hardware testing found some
-// platform/driver combinations don't honor reliably when the indicator
-// stays silent (observed blocking for minutes instead of the configured
-// duration). If the read is still outstanding when the deadline passes,
-// the port remains held until it eventually completes in the background —
-// the OS read call itself can't be forcibly interrupted without closing
-// the port out from under any other caller — so a queued RequestOne,
-// Stream, or command-mode call may itself wait that long for the port.
+// control to the caller by then. The port's own read timeout is set to the
+// same bound, so the port is free again at that point too. A Transport
+// whose Read ignores SetReadTimeout still returns control on time, but
+// keeps the port until its read completes in the background (it can't be
+// interrupted without closing the port), so a queued call waits for that.
+//
+// Anything received before the request is written is discarded first (see
+// discardInput), so a reply that arrives after its request timed out is
+// never taken as the next request's answer.
 func (c *Client) RequestOne(ctx context.Context) (Reading, error) {
 	if c.isClosed() {
 		return Reading{}, opErr("RequestOne", ErrClosed)
@@ -49,6 +50,10 @@ func (c *Client) RequestOne(ctx context.Context) (Reading, error) {
 	if err := c.port.SetReadTimeout(timeout); err != nil {
 		c.releasePort()
 		return Reading{}, opErr("RequestOne", err)
+	}
+	if err := c.discardInput(); err != nil {
+		c.releasePort()
+		return Reading{}, opErr("RequestOne", fmt.Errorf("discard stale input: %w", err))
 	}
 
 	if _, err := c.port.Write([]byte{byte(c.opts.DeviceID)}); err != nil {
@@ -88,14 +93,24 @@ func (c *Client) readLineBounded(ctx context.Context, timeout time.Duration) (st
 
 	select {
 	case res := <-done:
-		if res.err != nil && res.line == "" {
-			return "", fmt.Errorf("no data (timeout after %s): %w", timeout, res.err)
+		err := res.err
+		if errors.Is(err, errReadTimeout) {
+			err = context.DeadlineExceeded
 		}
-		return res.line, nil
+		switch {
+		case err == nil:
+			return res.line, nil
+		case res.line != "":
+			return "", fmt.Errorf("incomplete frame %q: %w", res.line, err)
+		case err == context.DeadlineExceeded:
+			return "", fmt.Errorf("no data (timeout after %s): %w", timeout, err)
+		default:
+			return "", fmt.Errorf("no data: %w", err)
+		}
 	case <-ctx.Done():
-		return "", fmt.Errorf("no data (gave up after %s, port still busy until the read completes): %w", timeout, ctx.Err())
+		return "", fmt.Errorf("no data: %w", ctx.Err())
 	case <-time.After(timeout):
-		return "", fmt.Errorf("no data (timeout after %s, port still busy until the read completes): %w", timeout, context.DeadlineExceeded)
+		return "", fmt.Errorf("no data (timeout after %s): %w", timeout, context.DeadlineExceeded)
 	}
 }
 

@@ -20,10 +20,10 @@
 //     request byte, 4 = interactive command mode). See Client.Stream,
 //     Client.RequestOne, and the command methods on Client.
 //
-// This package assumes the indicator is configured with F27=0 (8N1) and one
-// of the three documented frame formats; it does not attempt to change the
-// indicator's own Set Mode configuration over the wire (there is no
-// documented remote way to do that beyond the front panel).
+// DialOptions must match the indicator's F27 (parity) and F30/F34 (frame
+// format); this package does not attempt to change the indicator's own Set
+// Mode configuration over the wire (there is no documented remote way to do
+// that beyond the front panel).
 //
 // # Models
 //

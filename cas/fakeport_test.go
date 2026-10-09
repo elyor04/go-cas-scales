@@ -1,7 +1,6 @@
 package cas
 
 import (
-	"bufio"
 	"bytes"
 	"io"
 	"sync"
@@ -14,12 +13,18 @@ import (
 // "indicator" sends and Client.Read reads from; fromClient captures what
 // Client.Write sends, so tests can assert on outgoing command frames
 // without any real hardware.
+//
+// A reply queued with feed before the request is sent survives it:
+// ResetInputBuffer here is a no-op, unlike a real port's. Tests with more
+// than one request in flight set respond instead, which answers each write
+// as an indicator does, after the request.
 type fakePort struct {
 	mu         sync.Mutex
 	toClient   *bytes.Buffer
 	fromClient bytes.Buffer
 	closed     bool
 	mode       *serial.Mode
+	respond    func(request []byte) string
 }
 
 func newFakePort(toClient string) *fakePort {
@@ -47,6 +52,9 @@ func (p *fakePort) Write(b []byte) (int, error) {
 	defer p.mu.Unlock()
 	if p.closed {
 		return 0, io.ErrClosedPipe
+	}
+	if p.respond != nil {
+		p.toClient.WriteString(p.respond(b))
 	}
 	return p.fromClient.Write(b)
 }
@@ -87,25 +95,21 @@ func (p *fakePort) Close() error {
 // insists on a real OS port name) so tests can run without hardware.
 func newTestClient(opts DialOptions) (*Client, *fakePort) {
 	port := newFakePort("")
+	return newResolvedTestClient(port, opts), port
+}
+
+func newResolvedTestClient(port Transport, opts DialOptions) *Client {
 	resolved := opts.resolved()
 	if resolved.Format.Parse == nil {
 		resolved.Format = Format22Byte
 	}
-	c := &Client{
-		port:       port,
-		reader:     bufio.NewReader(port),
-		portTokens: newPortTokens(),
-		opts:       resolved,
-		sessions:   make(map[io_Closer]struct{}),
-	}
-	return c, port
+	return newClient(port, resolved)
 }
 
 // blockingReadPort wraps a fakePort but makes Read block for a fixed
-// duration regardless of whatever SetReadTimeout configured, reproducing
-// what real-hardware testing found on Windows when the indicator never
-// answers a request: the underlying read outlives the configured timeout
-// by a large margin instead of respecting it.
+// duration regardless of whatever SetReadTimeout configured: a Transport
+// that doesn't honor its read timeout. (Real-hardware reads that seemed to
+// do this were bufio's empty-read retries; see errReadTimeout.)
 type blockingReadPort struct {
 	*fakePort
 	blockFor time.Duration
@@ -121,16 +125,5 @@ func (p *blockingReadPort) Read(b []byte) (int, error) {
 // level, to verify Client enforces it independently at the ctx/Go level.
 func newBlockingTestClient(opts DialOptions, blockFor time.Duration) (*Client, *blockingReadPort) {
 	port := &blockingReadPort{fakePort: newFakePort(""), blockFor: blockFor}
-	resolved := opts.resolved()
-	if resolved.Format.Parse == nil {
-		resolved.Format = Format22Byte
-	}
-	c := &Client{
-		port:       port,
-		reader:     bufio.NewReader(port),
-		portTokens: newPortTokens(),
-		opts:       resolved,
-		sessions:   make(map[io_Closer]struct{}),
-	}
-	return c, port
+	return newResolvedTestClient(port, opts), port
 }

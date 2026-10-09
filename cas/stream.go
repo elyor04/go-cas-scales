@@ -123,12 +123,24 @@ func (c *Client) Stream(ctx context.Context) (<-chan Reading, <-chan error) {
 		close(errs)
 		return readings, errs
 	}
+	// A blocking read, rather than whatever RequestOne or a command last set:
+	// with a timeout, an idle line ended the stream with a read error.
+	if err := c.port.SetReadTimeout(noReadTimeout); err != nil {
+		c.releasePort()
+		errs <- opErr("Stream", err)
+		close(readings)
+		close(errs)
+		return readings, errs
+	}
 
 	s := &streamSession{done: make(chan struct{}), readings: readings, errs: errs}
 	c.track(s)
 
 	go func() {
 		defer func() {
+			// Also lets the ctx watcher below exit when the stream ends on its
+			// own; it otherwise lived until ctx was cancelled.
+			_ = s.Close()
 			c.untrack(s)
 			c.releasePort()
 			close(readings)

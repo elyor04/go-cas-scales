@@ -3,6 +3,7 @@ package cas
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -148,7 +149,7 @@ func TestReadValueCommandsNeverTouchThePort(t *testing.T) {
 
 func TestSetLimitsOnCI201A(t *testing.T) {
 	c, port := newTestClient(DialOptions{Model: ModelCI201A, DeviceID: 1})
-	port.feed("ok\r\nok\r\n")
+	port.respond = func([]byte) string { return "ok\r\n" }
 
 	if err := c.SetHighLimit(context.Background(), 123); err != nil {
 		t.Fatalf("SetHighLimit() error = %v", err)
@@ -183,6 +184,57 @@ func TestSetKeyTareValueFormatsFiveDigitField(t *testing.T) {
 	}
 	if got, want := port.written(), "D00HY00045\r\n"; got != want {
 		t.Errorf("written frame = %q, want %q", got, want)
+	}
+}
+
+func TestValueCommandsRejectValuesThatDoNotFitTheField(t *testing.T) {
+	// -5 used to go out as "-0004" and 123456 as six digits.
+	c, port := newTestClient(DialOptions{Model: ModelCI201A})
+	for _, v := range []float64{-5, -0.6, 99999.5, 123456, math.NaN(), math.Inf(1)} {
+		if err := c.SetKeyTareValue(context.Background(), v); err == nil {
+			t.Errorf("SetKeyTareValue(%v) succeeded, want an error", v)
+		}
+		if err := c.SetHighLimit(context.Background(), v); err == nil {
+			t.Errorf("SetHighLimit(%v) succeeded, want an error", v)
+		}
+		if err := c.SetLowLimit(context.Background(), v); err == nil {
+			t.Errorf("SetLowLimit(%v) succeeded, want an error", v)
+		}
+	}
+	if got := port.written(); got != "" {
+		t.Errorf("wrote %q to the port, want nothing", got)
+	}
+}
+
+func TestValueCommandsRoundToTheNearestUnit(t *testing.T) {
+	c, port := newTestClient(DialOptions{})
+	port.respond = func([]byte) string { return "ok\r\n" }
+	for _, v := range []float64{-0.4, 2.5, 99999.4} {
+		if err := c.SetKeyTareValue(context.Background(), v); err != nil {
+			t.Fatalf("SetKeyTareValue(%v): %v", v, err)
+		}
+	}
+	if got, want := port.written(), "D00HY00000\r\nD00HY00003\r\nD00HY99999\r\n"; got != want {
+		t.Errorf("written = %q, want %q", got, want)
+	}
+}
+
+func TestRequestWithCancelledContextWritesNothing(t *testing.T) {
+	// With the port free, select used to pick the port over the cancelled
+	// ctx about half the time and send the request anyway.
+	c, port := newTestClient(DialOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 50 {
+		if _, err := c.RequestOne(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RequestOne error = %v, want context.Canceled", err)
+		}
+		if err := c.Zero(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Zero error = %v, want context.Canceled", err)
+		}
+	}
+	if got := port.written(); got != "" {
+		t.Errorf("wrote %q to the port, want nothing", got)
 	}
 }
 

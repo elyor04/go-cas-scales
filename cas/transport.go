@@ -23,8 +23,31 @@ type Transport interface {
 	SetReadTimeout(t time.Duration) error
 }
 
-// DefaultDialTimeout bounds OpenTCP's connect when DialOptions has none.
+// DefaultDialTimeout bounds OpenTCP's connect.
 const DefaultDialTimeout = 5 * time.Second
+
+// noReadTimeout is the SetReadTimeout value that makes Read block until data
+// arrives (go.bug.st/serial's NoTimeout).
+const noReadTimeout time.Duration = -1
+
+// errReadTimeout is what the Client's reader sees in place of a timed-out
+// Read's (0, nil). bufio.Reader retries an empty read 100 times before giving
+// up with io.ErrNoProgress, so passed through as is, one ReadTimeout became a
+// hundred: RequestOne against a silent indicator held the port for 200s at
+// the default 2s. That was the read "blocking for minutes" seen on real
+// hardware, which this package used to put down to the serial driver.
+var errReadTimeout = errors.New("read timed out")
+
+// timeoutReader reports a Transport's timed-out read as errReadTimeout.
+type timeoutReader struct{ t Transport }
+
+func (r timeoutReader) Read(p []byte) (int, error) {
+	n, err := r.t.Read(p)
+	if n == 0 && err == nil && len(p) > 0 {
+		return 0, errReadTimeout
+	}
+	return n, err
+}
 
 // OpenTransport returns a Client reading from an already-open transport.
 // Format is resolved exactly as Open resolves it; Port, BaudRate and
@@ -66,7 +89,7 @@ func OpenTCP(address string, opts DialOptions) (*Client, error) {
 		_ = tc.SetKeepAlive(true)
 		_ = tc.SetKeepAlivePeriod(15 * time.Second)
 	}
-	return newClient(&tcpTransport{conn: conn, timeout: -1}, resolved), nil
+	return newClient(&tcpTransport{conn: conn, timeout: noReadTimeout}, resolved), nil
 }
 
 // tcpTransport adapts a net.Conn to Transport's serial-port semantics.
@@ -102,6 +125,27 @@ func (t *tcpTransport) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	return n, err
+}
+
+// ResetInputBuffer discards whatever the connection has already received, as
+// serial.Port's ResetInputBuffer purges its receive buffer (see
+// Client.discardInput).
+func (t *tcpTransport) ResetInputBuffer() error {
+	buf := make([]byte, 512)
+	for {
+		if err := t.conn.SetReadDeadline(time.Now().Add(time.Millisecond)); err != nil {
+			return err
+		}
+		n, err := t.conn.Read(buf)
+		if n > 0 {
+			continue
+		}
+		var ne net.Error
+		if err == nil || errors.As(err, &ne) && ne.Timeout() {
+			return nil
+		}
+		return err
+	}
 }
 
 func (t *tcpTransport) Write(p []byte) (int, error) { return t.conn.Write(p) }

@@ -21,13 +21,14 @@ func TestConcurrentRequestOneEachGetsExactlyOneFrame(t *testing.T) {
 	c, port := newTestClient(DialOptions{})
 
 	want := make([]float64, n)
-	var feed strings.Builder
 	for i := range n {
-		v := float64((i + 1) * 10)
-		want[i] = v
-		feed.WriteString(cas22("ST", "GS", 1, lamp22(false, false, false), fmt.Sprintf("%08.1f", v), "kg") + "\r\n")
+		want[i] = float64((i + 1) * 10)
 	}
-	port.feed(feed.String())
+	answered := 0
+	port.respond = func([]byte) string {
+		answered++
+		return cas22("ST", "GS", 1, lamp22(false, false, false), fmt.Sprintf("%08.1f", float64(answered*10)), "kg") + "\r\n"
+	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -71,12 +72,7 @@ func TestConcurrentRequestOneEachGetsExactlyOneFrame(t *testing.T) {
 func TestConcurrentCommandsSerializeOntoDistinctFrames(t *testing.T) {
 	const n = 8
 	c, port := newTestClient(DialOptions{DeviceID: 3})
-
-	var feed strings.Builder
-	for range n {
-		feed.WriteString("ok\r\n")
-	}
-	port.feed(feed.String())
+	port.respond = func([]byte) string { return "ok\r\n" }
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, n)
@@ -153,12 +149,9 @@ func TestStreamRespectsContextWhilePortBusy(t *testing.T) {
 	}
 }
 
-// TestRequestOneReturnsAtTimeoutEvenIfUnderlyingReadIsStuck reproduces what
-// real-hardware testing found: on at least one platform/driver combination,
-// the underlying port's Read call didn't honor SetReadTimeout when the
-// indicator stayed silent, blocking for minutes instead of the configured
-// duration. RequestOne must still return control to the caller by its own
-// timeout regardless of what the underlying read does.
+// TestRequestOneReturnsAtTimeoutEvenIfUnderlyingReadIsStuck checks that a
+// Transport whose Read ignores SetReadTimeout still can't hold the caller
+// past its own timeout.
 func TestRequestOneReturnsAtTimeoutEvenIfUnderlyingReadIsStuck(t *testing.T) {
 	c, _ := newBlockingTestClient(DialOptions{ReadTimeout: 50 * time.Millisecond}, 2*time.Second)
 
@@ -193,11 +186,11 @@ func TestSendCommandReturnsAtTimeoutEvenIfUnderlyingReadIsStuck(t *testing.T) {
 }
 
 // TestRequestOnePortStaysBusyUntilAbandonedReadCompletes documents the
-// tradeoff that comes with the fix above: since the stuck OS-level read
-// can't be forcibly interrupted without closing the port out from under
-// other callers, the port isn't actually free the instant a timed-out
-// caller returns — a queued caller waits for the abandoned read to
-// complete too, exactly as RequestOne's doc comment describes.
+// other side of that: on such a Transport the stuck read can't be
+// interrupted without closing the port out from under other callers, so a
+// queued caller waits for it to complete, as RequestOne's doc comment says.
+// A Transport that honors its timeout frees the port with the timeout; see
+// TestRequestOne_TimeoutFreesThePort.
 func TestRequestOnePortStaysBusyUntilAbandonedReadCompletes(t *testing.T) {
 	c, _ := newBlockingTestClient(DialOptions{ReadTimeout: 50 * time.Millisecond}, 300*time.Millisecond)
 

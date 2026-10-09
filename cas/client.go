@@ -34,11 +34,8 @@ type io_Closer interface {
 // exclusive device configurations (F31/F35) to begin with.
 //
 // RequestOne and the command-mode methods always return control to their
-// own caller by DialOptions.ReadTimeout (or ctx's deadline, if sooner),
-// independent of whether the underlying port's read timeout is actually
-// honored — see RequestOne's doc comment. If that underlying read is still
-// outstanding when the deadline passes, the port stays held until it
-// completes in the background, so a queued caller may still wait for it.
+// own caller by DialOptions.ReadTimeout (or ctx's deadline, if sooner) —
+// see RequestOne's doc comment.
 type Client struct {
 	mu         sync.Mutex
 	port       Transport
@@ -63,6 +60,12 @@ func newPortTokens() chan struct{} {
 // bracketed by acquirePort/releasePort (typically via defer) so concurrent
 // callers are serialized into one request/response at a time on the wire.
 func (c *Client) acquirePort(ctx context.Context) error {
+	// Checked first because select picks at random among ready cases: with
+	// the port free, a cancelled ctx would otherwise still win it half the
+	// time and go on to write a request.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case <-c.portTokens:
 		return nil
@@ -73,6 +76,20 @@ func (c *Client) acquirePort(ctx context.Context) error {
 
 func (c *Client) releasePort() {
 	c.portTokens <- struct{}{}
+}
+
+// discardInput drops everything received before a request is written: a
+// reply that arrived after its own request timed out, or a frame left over
+// from the last one, would otherwise be read as this request's answer, and
+// every reading after it would be one request stale. It empties the Client's
+// own buffer and, when the transport can (serial.Port and OpenTCP's
+// connection both can), the transport's.
+func (c *Client) discardInput() error {
+	_, _ = c.reader.Discard(c.reader.Buffered())
+	if r, ok := c.port.(interface{ ResetInputBuffer() error }); ok {
+		return r.ResetInputBuffer()
+	}
+	return nil
 }
 
 // Open opens the serial port named by opts.Port and returns a Client ready
@@ -107,7 +124,7 @@ func Open(opts DialOptions) (*Client, error) {
 func newClient(port Transport, opts DialOptions) *Client {
 	return &Client{
 		port:       port,
-		reader:     bufio.NewReader(port),
+		reader:     bufio.NewReader(timeoutReader{port}),
 		portTokens: newPortTokens(),
 		opts:       opts,
 		sessions:   make(map[io_Closer]struct{}),
