@@ -16,8 +16,8 @@
 //   - F30/F34: frame format for COM1/COM2 (0 = 22-byte CAS, 1 = 10-byte CAS,
 //     2 = 18-byte AND-compatible). See FrameFormat.
 //   - F31/F35: output mode for COM1/COM2 (0 = off, 1 = stream continuously,
-//     2 = stream only while stable, 3 = send one frame per request byte,
-//     4 = interactive command mode, COM1 only). See Client.Stream,
+//     2 = stream only while stable; COM1 only: 3 = send one frame per
+//     request byte, 4 = interactive command mode). See Client.Stream,
 //     Client.RequestOne, and the command methods on Client.
 //
 // This package assumes the indicator is configured with F27=0 (8N1) and one
@@ -50,7 +50,7 @@ const (
 	// protocol as CI-200A.
 	ModelCI200SC
 	// ModelCI201A is the LCD-display model. It additionally supports the
-	// High/Low limit commands (see Client.HighLimit, Client.LowLimit).
+	// High/Low limit commands (see Client.SetHighLimit, Client.SetLowLimit).
 	ModelCI201A
 )
 

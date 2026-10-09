@@ -25,9 +25,7 @@ func TestConcurrentRequestOneEachGetsExactlyOneFrame(t *testing.T) {
 	for i := range n {
 		v := float64((i + 1) * 10)
 		want[i] = v
-		fmt.Fprintf(&feed, "ST,GS,01,%08.1f", v)
-		feed.WriteByte(lamp22(false, false, false))
-		feed.WriteString("kg\r\n")
+		feed.WriteString(cas22("ST", "GS", 1, lamp22(false, false, false), fmt.Sprintf("%08.1f", v), "kg") + "\r\n")
 	}
 	port.feed(feed.String())
 
@@ -249,7 +247,7 @@ func TestRequestOneQueuesBehindActiveStreamThenRuns(t *testing.T) {
 		// isn't required for correctness (RequestOne would simply queue
 		// longer otherwise) but keeps the test fast and deterministic.
 		time.Sleep(20 * time.Millisecond)
-		port.feed("ST,GS,01,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg\r\n")
+		port.feed(cas22("ST", "GS", 1, lamp22(false, false, false), "000013.5", "kg") + "\r\n")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

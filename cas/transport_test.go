@@ -43,7 +43,7 @@ func frame22(kg float64) string {
 	v := []byte("000000.0")
 	str := []byte(formatField(kg))
 	copy(v[len(v)-len(str):], str)
-	return "ST,GS,01," + string(v) + string([]byte{lamp22(false, false, false)}) + "kg"
+	return cas22("ST", "GS", 1, lamp22(false, false, false), string(v), "kg")
 }
 
 func formatField(kg float64) string {

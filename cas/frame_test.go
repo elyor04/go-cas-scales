@@ -22,10 +22,36 @@ func lamp22(hold, tare, atZero bool) byte {
 	return b
 }
 
+// cas22 builds a Format22Byte frame (without its CR/LF) in the manual's
+// layout: the device ID and lamp byte are single raw bytes between the
+// second and third commas, and a space separates the weight from the unit.
+func cas22(status, wtype string, id, lamp byte, weight, unit string) string {
+	return status + "," + wtype + "," + string([]byte{id, lamp}) + "," + weight + " " + unit
+}
+
+// realCI200AEmptyStable is a frame captured from a real CI-200A on an empty
+// platform (device 00, stable, gross, zero lamp lit), byte for byte.
+var realCI200AEmptyStable = []byte{
+	0x53, 0x54, 0x2C, 0x47, 0x53, 0x2C, 0x00, 0xC5, 0x2C, 0x20, 0x20,
+	0x20, 0x20, 0x20, 0x30, 0x2E, 0x30, 0x20, 0x6B, 0x67, 0x0D, 0x0A,
+}
+
+func TestParseCAS22RealHardwareFrame(t *testing.T) {
+	r, err := parseCAS22(realCI200AEmptyStable)
+	if err != nil {
+		t.Fatalf("parseCAS22(% X) error = %v", realCI200AEmptyStable, err)
+	}
+	want := Reading{Value: 0, Unit: "kg", Stable: true, AtZero: true, DeviceID: 0,
+		Raw: string(realCI200AEmptyStable[:20])}
+	if r != want {
+		t.Errorf("parseCAS22(% X) = %+v, want %+v", realCI200AEmptyStable, r, want)
+	}
+}
+
 func TestParseCAS22StableGross(t *testing.T) {
 	// Built from the manual's own worked example: 13.5 kg is sent as the
 	// 8-byte ASCII field "000013.5".
-	content := "ST,GS,01,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"
+	content := cas22("ST", "GS", 1, lamp22(false, false, false), "000013.5", "kg")
 
 	r, err := parseCAS22([]byte(content))
 	if err != nil {
@@ -38,7 +64,7 @@ func TestParseCAS22StableGross(t *testing.T) {
 }
 
 func TestParseCAS22TrailingCRLFStripped(t *testing.T) {
-	content := "ST,GS,01,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"
+	content := cas22("ST", "GS", 1, lamp22(false, false, false), "000013.5", "kg")
 	r, err := parseCAS22([]byte(content + "\r\n"))
 	if err != nil {
 		t.Fatalf("parseCAS22 with CRLF: error = %v", err)
@@ -49,7 +75,7 @@ func TestParseCAS22TrailingCRLFStripped(t *testing.T) {
 }
 
 func TestParseCAS22NetUnstableWithLampBits(t *testing.T) {
-	content := "US,NT,42,-00120.0" + string([]byte{lamp22(true, true, true)}) + "lb"
+	content := cas22("US", "NT", 42, lamp22(true, true, true), "-00120.0", "lb")
 	r, err := parseCAS22([]byte(content))
 	if err != nil {
 		t.Fatalf("parseCAS22(%q) error = %v", content, err)
@@ -60,8 +86,68 @@ func TestParseCAS22NetUnstableWithLampBits(t *testing.T) {
 	}
 }
 
+func TestParseCAS22EachLampBitOnItsOwn(t *testing.T) {
+	cases := []struct {
+		name               string
+		lamp               byte
+		hold, tare, atZero bool
+	}{
+		{"none", lamp22(false, false, false), false, false, false},
+		{"hold", lamp22(true, false, false), true, false, false},
+		{"tare", lamp22(false, true, false), false, true, false},
+		{"zero", lamp22(false, false, true), false, false, true},
+		// Stable, Printer and Gross are set but are not read from the lamp.
+		{"other bits only", 0x80 | 1<<6 | 1<<3 | 1<<2, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := parseCAS22([]byte(cas22("ST", "GS", 0, tc.lamp, "000100.0", "kg")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Hold != tc.hold || r.Tare != tc.tare || r.AtZero != tc.atZero {
+				t.Errorf("lamp %#02x: Hold/Tare/AtZero = %v/%v/%v, want %v/%v/%v",
+					tc.lamp, r.Hold, r.Tare, r.AtZero, tc.hold, tc.tare, tc.atZero)
+			}
+		})
+	}
+}
+
+func TestParseCAS22LampByteWithWrongFixedBitsIsIgnored(t *testing.T) {
+	// The manual fixes bit 7 at 1 and bit 5 at 0. A byte that breaks either
+	// isn't a lamp byte, so its other bits must not light anything. 0x3F
+	// is '?' (bit 7 clear); 0xBF has bit 5 set; 0x20 is the space the
+	// previous version of this parser mistook for the lamp byte.
+	for _, lamp := range []byte{0x3F, 0xBF, 0x20} {
+		r, err := parseCAS22([]byte(cas22("ST", "GS", 0, lamp, "000000.0", "kg")))
+		if err != nil {
+			t.Fatalf("lamp %#02x: error = %v, want the rest of the frame decoded", lamp, err)
+		}
+		if r.Hold || r.Tare || r.AtZero {
+			t.Errorf("lamp %#02x: Hold/Tare/AtZero = %v/%v/%v, want all false", lamp, r.Hold, r.Tare, r.AtZero)
+		}
+		if !r.Stable || r.Unit != "kg" {
+			t.Errorf("lamp %#02x: %+v, want Stable and kg still decoded", lamp, r)
+		}
+	}
+}
+
+func TestParseCAS22DeviceIDIsOneRawByte(t *testing.T) {
+	// 44 is 0x2C, a comma; 10 and 13 are LF and CR. None may throw off the
+	// decode, which is positional for exactly this reason.
+	for _, id := range []byte{0, 10, 12, 13, 44, 99} {
+		r, err := parseCAS22([]byte(cas22("ST", "GS", id, lamp22(false, false, true), "000013.5", "kg")))
+		if err != nil {
+			t.Fatalf("device %d: error = %v", id, err)
+		}
+		if r.DeviceID != int(id) || r.Value != 13.5 || !r.AtZero {
+			t.Errorf("device %d: %+v, want DeviceID=%d Value=13.5 AtZero", id, r, id)
+		}
+	}
+}
+
 func TestParseCAS22Overload(t *testing.T) {
-	content := "OL,GS,00,999999.9" + string([]byte{lamp22(false, false, false)}) + "kg"
+	content := cas22("OL", "GS", 0, lamp22(false, false, false), "999999.9", "kg")
 	r, err := parseCAS22([]byte(content))
 	if err != nil {
 		t.Fatalf("parseCAS22(%q) error = %v", content, err)
@@ -72,15 +158,19 @@ func TestParseCAS22Overload(t *testing.T) {
 }
 
 func TestParseCAS22Errors(t *testing.T) {
+	lamp := lamp22(false, false, false)
 	cases := []struct {
 		name    string
 		content string
 	}{
 		{"too short", "ST,GS,01,00"},
-		{"wrong field count", "ST,GS,000013.5kg"},
-		{"bad status", "XX,GS,01,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"},
-		{"bad weight type", "ST,XX,01,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"},
-		{"non numeric weight", "ST,GS,01,NOTANUM." + string([]byte{lamp22(false, false, false)}) + "kg"},
+		{"too long", cas22("ST", "GS", 1, lamp, "000013.5", "kg") + "x"},
+		{"no separator after status", "ST;GS," + string([]byte{1, lamp}) + ",000013.5 kg"},
+		{"no separator after type", "ST,GS;" + string([]byte{1, lamp}) + ",000013.5 kg"},
+		{"no separator after lamp", "ST,GS," + string([]byte{1, lamp}) + ";000013.5 kg"},
+		{"bad status", cas22("XX", "GS", 1, lamp, "000013.5", "kg")},
+		{"bad weight type", cas22("ST", "XX", 1, lamp, "000013.5", "kg")},
+		{"non numeric weight", cas22("ST", "GS", 1, lamp, "NOTANUM.", "kg")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,37 +181,20 @@ func TestParseCAS22Errors(t *testing.T) {
 	}
 }
 
-func TestParseCAS22NonASCIIDeviceIDFallsBackToRawBinary(t *testing.T) {
-	// Real hardware (see cas/frame.go doc comment) has been observed
-	// sending this sub-field as raw binary rather than 2 ASCII digits,
-	// with the first byte matching F26 exactly (device 3 as byte 0x03,
-	// straight from a real capture). The rest of the frame must still
-	// decode instead of the whole Reading being discarded, and DeviceID
-	// should recover 3 from the raw byte rather than giving up to -1.
-	content := "ST,GS," + string([]byte{0x03, 0xC4}) + ",000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"
-	r, err := parseCAS22([]byte(content))
-	if err != nil {
-		t.Fatalf("parseCAS22(%q) error = %v, want a successful decode", content, err)
-	}
-	if r.DeviceID != 3 {
-		t.Errorf("DeviceID = %d, want 3 recovered from the raw first byte 0x03", r.DeviceID)
-	}
-	if r.Value != 13.5 || r.Unit != "kg" || !r.Stable {
-		t.Errorf("parseCAS22(%q) = %+v, want Value=13.5 Unit=kg Stable=true despite the non-ASCII device ID", content, r)
-	}
-}
-
 func TestParseCAS22ImplausibleDeviceIDByteFallsBackToNegativeOne(t *testing.T) {
-	// A first byte outside F26's documented 00-99 range doesn't look like
-	// a real device ID at all (more likely line noise), so DeviceID must
-	// fall all the way back to -1 rather than reporting a bogus value.
-	content := "ST,GS," + string([]byte{0xFF, 0xC4}) + ",000013.5" + string([]byte{lamp22(false, false, false)}) + "kg"
+	// A byte outside F26's documented 00-99 range doesn't look like a real
+	// device ID at all (more likely line noise), so DeviceID must fall all
+	// the way back to -1 rather than reporting a bogus value.
+	content := cas22("ST", "GS", 0xFF, lamp22(false, false, false), "000013.5", "kg")
 	r, err := parseCAS22([]byte(content))
 	if err != nil {
 		t.Fatalf("parseCAS22(%q) error = %v, want a successful decode", content, err)
 	}
 	if r.DeviceID != -1 {
 		t.Errorf("DeviceID = %d, want -1 for an implausible (>99) raw device-ID byte", r.DeviceID)
+	}
+	if r.Value != 13.5 || r.Unit != "kg" || !r.Stable {
+		t.Errorf("parseCAS22(%q) = %+v, want the rest decoded despite the bad ID", content, r)
 	}
 }
 

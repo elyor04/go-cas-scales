@@ -41,6 +41,11 @@ var (
 	// configured Model does not support (see Model.SupportsLimits).
 	ErrUnsupportedByModel = errors.New("cas: command not supported by this model")
 
+	// ErrNoReadCommand is returned by the deprecated KeyTareValue,
+	// HighLimit and LowLimit: the CI-200 command set can set these values
+	// but has no command that reads them back.
+	ErrNoReadCommand = errors.New("cas: the indicator has no command to read this value")
+
 	// ErrUnpopulatedFormat is returned by Open when opts.Format looks
 	// like an unpopulated zero-value FrameFormat rather than one of the
 	// documented presets or a fully-specified custom format.

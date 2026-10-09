@@ -71,7 +71,7 @@ func TestRequestOneWritesRawBinaryDeviceIDByte(t *testing.T) {
 	// the raw device-ID value as a single byte (device 10 -> byte 0x0A),
 	// not an ASCII digit string — distinct from command-mode framing.
 	c, port := newTestClient(DialOptions{DeviceID: 10})
-	port.feed("ST,GS,10,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg\r\n")
+	port.feed(cas22("ST", "GS", 10, lamp22(false, false, false), "000013.5", "kg") + "\r\n")
 
 	r, err := c.RequestOne(context.Background())
 	if err != nil {
@@ -96,19 +96,81 @@ func TestHighLimitUnsupportedByModelDoesNotTouchThePort(t *testing.T) {
 	}
 }
 
-func TestHighLimitSupportedByCI201A(t *testing.T) {
-	c, port := newTestClient(DialOptions{Model: ModelCI201A, DeviceID: 1})
-	port.feed("HI00123\r\n")
+func TestRequestOneReadsAFrameWhoseDeviceIDIsCR(t *testing.T) {
+	// Device 13's ID byte is 0x0D. Followed by the lamp byte (bit 7 always
+	// set), it never forms the CR LF that ends the frame.
+	c, port := newTestClient(DialOptions{DeviceID: 13})
+	port.feed(cas22("ST", "GS", 13, lamp22(false, false, true), "000013.5", "kg") + "\r\n")
 
-	v, err := c.HighLimit(context.Background())
+	r, err := c.RequestOne(context.Background())
 	if err != nil {
-		t.Fatalf("HighLimit() error = %v", err)
+		t.Fatalf("RequestOne() error = %v", err)
 	}
-	if v != 123 {
-		t.Errorf("HighLimit() = %v, want 123", v)
+	if r.DeviceID != 13 || r.Value != 13.5 || !r.AtZero {
+		t.Errorf("RequestOne() = %+v, want DeviceID=13 Value=13.5 AtZero", r)
 	}
-	if got, want := port.written(), "D01HI00000\r\n"; got != want {
+}
+
+func TestRequestWeightReadsAFrameWhoseDeviceIDIsLF(t *testing.T) {
+	c, port := newTestClient(DialOptions{DeviceID: 10})
+	port.feed(cas22("US", "NT", 10, lamp22(true, false, false), "000042.0", "kg") + "\r\n")
+
+	r, err := c.RequestWeight(context.Background())
+	if err != nil {
+		t.Fatalf("RequestWeight() error = %v", err)
+	}
+	if r.DeviceID != 10 || r.Value != 42 || !r.Net || !r.Hold {
+		t.Errorf("RequestWeight() = %+v, want DeviceID=10 Value=42 Net Hold", r)
+	}
+	if got, want := port.written(), "D10KW\r\n"; got != want {
 		t.Errorf("written frame = %q, want %q", got, want)
+	}
+}
+
+func TestReadValueCommandsNeverTouchThePort(t *testing.T) {
+	// "HY00000" / "HI00000" / "HL00000" are the frames that set those
+	// values to 0, so the deprecated readers must not send them.
+	c, port := newTestClient(DialOptions{Model: ModelCI201A, DeviceID: 1})
+	reads := map[string]func(context.Context) (float64, error){
+		"KeyTareValue": c.KeyTareValue,
+		"HighLimit":    c.HighLimit,
+		"LowLimit":     c.LowLimit,
+	}
+	for name, read := range reads {
+		if _, err := read(context.Background()); !errors.Is(err, ErrNoReadCommand) {
+			t.Errorf("%s() error = %v, want it to wrap ErrNoReadCommand", name, err)
+		}
+	}
+	if got := port.written(); got != "" {
+		t.Errorf("the read-value methods wrote %q to the port, want nothing", got)
+	}
+}
+
+func TestSetLimitsOnCI201A(t *testing.T) {
+	c, port := newTestClient(DialOptions{Model: ModelCI201A, DeviceID: 1})
+	port.feed("ok\r\nok\r\n")
+
+	if err := c.SetHighLimit(context.Background(), 123); err != nil {
+		t.Fatalf("SetHighLimit() error = %v", err)
+	}
+	if err := c.SetLowLimit(context.Background(), 7); err != nil {
+		t.Fatalf("SetLowLimit() error = %v", err)
+	}
+	if got, want := port.written(), "D01HI00123\r\nD01HL00007\r\n"; got != want {
+		t.Errorf("written frames = %q, want %q", got, want)
+	}
+}
+
+func TestSetLimitsUnsupportedByModelDoNotTouchThePort(t *testing.T) {
+	c, port := newTestClient(DialOptions{Model: ModelCI200A})
+	if err := c.SetHighLimit(context.Background(), 1); !errors.Is(err, ErrUnsupportedByModel) {
+		t.Errorf("SetHighLimit error = %v, want it to wrap ErrUnsupportedByModel", err)
+	}
+	if err := c.SetLowLimit(context.Background(), 1); !errors.Is(err, ErrUnsupportedByModel) {
+		t.Errorf("SetLowLimit error = %v, want it to wrap ErrUnsupportedByModel", err)
+	}
+	if got := port.written(); got != "" {
+		t.Errorf("wrote %q to the port, want nothing", got)
 	}
 }
 

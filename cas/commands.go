@@ -3,14 +3,12 @@ package cas
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 )
 
 // SendCommand is the low-level command-mode primitive: it builds a
-// "D<deviceID><code><data>\r\n" request frame (Set Mode F31/F35 = 4,
-// COM1 only), writes it, and returns whatever the indicator sends back
+// "D<deviceID><code><data>\r\n" request frame (Set Mode F31 = 4, COM1
+// only), writes it, and returns whatever the indicator sends back
 // before DialOptions.ReadTimeout (or ctx's deadline, if sooner) expires.
 // As with RequestOne, that bound is enforced independently of the
 // underlying port's own read timeout — see RequestOne's doc comment for
@@ -24,12 +22,10 @@ import (
 // real hardware, this package doesn't guess by exposing a Client.KT method;
 // send it yourself via SendCommand if you need to find out.
 //
-// The manual only documents the response to every command generically as
-// "Received Data Return," without giving an exact byte layout distinct
-// from the normal weight frame for the read-value commands (HI, HL, ID,
-// HY) — the named wrappers for those (KeyTareValue, HighLimit, LowLimit)
-// make a best-effort attempt to find a trailing numeric value in whatever
-// comes back. Verify against real hardware before relying on it.
+// The manual documents the response to every command only as "Received
+// Data Return," without a byte layout. The value-carrying codes (HY, HI,
+// HL, ID) take a 5-digit data field and set that value; none of them reads
+// one back (see KeyTareValue).
 func (c *Client) SendCommand(ctx context.Context, code, data string) ([]byte, error) {
 	if c.isClosed() {
 		return nil, opErr("SendCommand", ErrClosed)
@@ -116,71 +112,75 @@ func (c *Client) RequestWeight(ctx context.Context) (Reading, error) {
 	return r, nil
 }
 
-// KeyTareValue reads the indicator's stored key-tare value (command code
-// HY). See the SendCommand doc comment for the caveat on response parsing.
+// KeyTareValue used to read the key-tare value by sending "HY00000". That
+// is byte for byte the frame SetKeyTareValue(0) sends: the manual's command
+// table gives HY, HI and HL a 5-digit value field and documents every reply
+// only as "Received Data Return", i.e. an echo. So the "read" could only
+// ever clear the stored value and hand back the echoed zero. It now returns
+// ErrNoReadCommand without touching the port.
+//
+// Deprecated: the CI-200 command set has no way to read this value.
 func (c *Client) KeyTareValue(ctx context.Context) (float64, error) {
-	resp, err := c.SendCommand(ctx, "HY", "00000")
-	if err != nil {
-		return 0, opErr("KeyTareValue", err)
-	}
-	v, err := trailingNumber(resp)
-	return v, opErr("KeyTareValue", err)
+	return 0, opErr("KeyTareValue", ErrNoReadCommand)
 }
 
 // SetKeyTareValue writes the indicator's key-tare value (command code HY).
-// The manual doesn't fully specify the write encoding for this field (a
-// related command table for it notes only "DATA (Not include decimal
-// point)"); this sends v rounded to the nearest whole unit as a 5-digit,
-// zero-padded field. Verify against real hardware before relying on it for
-// non-integer tare values.
+// See limitField for how v is encoded.
 func (c *Client) SetKeyTareValue(ctx context.Context, v float64) error {
-	_, err := c.SendCommand(ctx, "HY", fmt.Sprintf("%05d", int64(v+0.5)))
+	_, err := c.SendCommand(ctx, "HY", limitField(v))
 	return opErr("SetKeyTareValue", err)
 }
 
-// HighLimit reads the indicator's high-limit value (command code HI).
-// Returns ErrUnsupportedByModel unless the configured Model reports
-// SupportsLimits (CI-201A, CI-200SC — the manual documents this command as
-// "LCD, SC Only").
+// HighLimit used to read the high limit by sending "HI00000"; like
+// KeyTareValue, that frame can only set the limit to 0. It now returns
+// ErrNoReadCommand without touching the port (ErrUnsupportedByModel first,
+// on a model without limits).
+//
+// Deprecated: the CI-200 command set has no way to read this value.
 func (c *Client) HighLimit(ctx context.Context) (float64, error) {
 	if !c.opts.Model.SupportsLimits() {
 		return 0, opErr("HighLimit", ErrUnsupportedByModel)
 	}
-	resp, err := c.SendCommand(ctx, "HI", "00000")
-	if err != nil {
-		return 0, opErr("HighLimit", err)
-	}
-	v, err := trailingNumber(resp)
-	return v, opErr("HighLimit", err)
+	return 0, opErr("HighLimit", ErrNoReadCommand)
 }
 
-// LowLimit reads the indicator's low-limit value (command code HL). See
-// HighLimit for the Model restriction.
+// LowLimit is HighLimit's counterpart for the low limit (HL).
+//
+// Deprecated: the CI-200 command set has no way to read this value.
 func (c *Client) LowLimit(ctx context.Context) (float64, error) {
 	if !c.opts.Model.SupportsLimits() {
 		return 0, opErr("LowLimit", ErrUnsupportedByModel)
 	}
-	resp, err := c.SendCommand(ctx, "HL", "00000")
-	if err != nil {
-		return 0, opErr("LowLimit", err)
-	}
-	v, err := trailingNumber(resp)
-	return v, opErr("LowLimit", err)
+	return 0, opErr("LowLimit", ErrNoReadCommand)
 }
 
-// trailingNumber extracts the trailing run of digits/sign/decimal-point
-// characters from a command response and parses it as a float, ignoring
-// whatever prefix (echoed device ID, command code, frame status fields)
-// precedes it.
-func trailingNumber(resp []byte) (float64, error) {
-	s := strings.TrimSpace(string(trimFrame(resp)))
-	i := strings.LastIndexFunc(s, func(r rune) bool {
-		return !(r == '-' || r == '.' || (r >= '0' && r <= '9'))
-	})
-	numStr := s[i+1:]
-	v, err := strconv.ParseFloat(numStr, 64)
-	if err != nil {
-		return 0, fmt.Errorf("no numeric value found in response %q: %w", s, err)
+// SetHighLimit writes the indicator's high limit (command code HI). Returns
+// ErrUnsupportedByModel unless the configured Model reports SupportsLimits
+// (CI-201A, CI-200SC — the manual documents this command as "LCD, SC
+// Only"). See limitField for how v is encoded.
+func (c *Client) SetHighLimit(ctx context.Context, v float64) error {
+	if !c.opts.Model.SupportsLimits() {
+		return opErr("SetHighLimit", ErrUnsupportedByModel)
 	}
-	return v, nil
+	_, err := c.SendCommand(ctx, "HI", limitField(v))
+	return opErr("SetHighLimit", err)
+}
+
+// SetLowLimit writes the indicator's low limit (command code HL). See
+// SetHighLimit.
+func (c *Client) SetLowLimit(ctx context.Context, v float64) error {
+	if !c.opts.Model.SupportsLimits() {
+		return opErr("SetLowLimit", ErrUnsupportedByModel)
+	}
+	_, err := c.SendCommand(ctx, "HL", limitField(v))
+	return opErr("SetLowLimit", err)
+}
+
+// limitField encodes a value for the 5-digit field of HY/HI/HL. The manual
+// doesn't fully specify it (a related command table notes only "DATA (Not
+// include decimal point)"); this sends v rounded to the nearest whole unit,
+// zero-padded. Verify against real hardware before relying on it for
+// non-integer values.
+func limitField(v float64) string {
+	return fmt.Sprintf("%05d", int64(v+0.5))
 }

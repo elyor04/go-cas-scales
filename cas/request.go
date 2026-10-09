@@ -1,18 +1,21 @@
 package cas
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"time"
 )
 
 // RequestOne asks the indicator for a single frame and returns it. It's the
-// counterpart to Set Mode F31/F35 = 3 ("send upon data request"): per the
-// manual, the request signal is one raw binary byte equal to the F26
-// device ID (e.g. device 10 is requested with byte 0x0A) — not an ASCII
-// digit string. Do not confuse this with the ASCII "D dd CODE CR LF"
-// framing used by the command-mode methods (Zero, Gross, Net, ...), which
-// requires F31/F35 = 4 instead and is a different indicator mode.
+// counterpart to Set Mode F31 = 3 ("send upon data request"), which exists
+// on COM1 only (F35, COM2's output mode, goes up to 2): per the manual, the
+// request signal is one raw binary byte equal to the F26 device ID (e.g.
+// device 10 is requested with byte 0x0A) — not an ASCII digit string. Do
+// not confuse this with the ASCII "D dd CODE CR LF" framing used by the
+// command-mode methods (Zero, Gross, Net, ...), which requires F31 = 4
+// instead and is a different indicator mode.
 //
 // The call is bounded by DialOptions.ReadTimeout, shortened to ctx's
 // deadline if ctx has one and it's sooner: RequestOne always returns
@@ -78,7 +81,7 @@ func (c *Client) readLineBounded(ctx context.Context, timeout time.Duration) (st
 	}
 	done := make(chan result, 1)
 	go func() {
-		line, err := c.reader.ReadString('\n')
+		line, err := readCRLF(c.reader)
 		done <- result{line, err}
 		c.releasePort()
 	}()
@@ -93,5 +96,21 @@ func (c *Client) readLineBounded(ctx context.Context, timeout time.Duration) (st
 		return "", fmt.Errorf("no data (gave up after %s, port still busy until the read completes): %w", timeout, ctx.Err())
 	case <-time.After(timeout):
 		return "", fmt.Errorf("no data (timeout after %s, port still busy until the read completes): %w", timeout, context.DeadlineExceeded)
+	}
+}
+
+// readCRLF reads up to and including the next CR LF pair, the terminator of
+// every documented frame. A lone LF is not enough: Format22Byte's device-ID
+// byte is binary, so device 10 puts a 0x0A in the middle of the frame. It
+// can't fake the pair, because the byte before it is always a comma and
+// the lamp byte after a device-13 0x0D always has bit 7 set.
+func readCRLF(r *bufio.Reader) (string, error) {
+	var line []byte
+	for {
+		chunk, err := r.ReadBytes('\n')
+		line = append(line, chunk...)
+		if err != nil || bytes.HasSuffix(line, []byte("\r\n")) {
+			return string(line), err
+		}
 	}
 }

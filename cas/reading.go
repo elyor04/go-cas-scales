@@ -28,23 +28,22 @@ type Reading struct {
 	// gross weight ("GS").
 	Net bool
 	// Hold reports the indicator's Hold lamp bit. Only populated by
-	// Format22Byte.
+	// Format22Byte, and false if the frame's lamp byte has the wrong
+	// fixed bits (see Format22Byte).
 	Hold bool
-	// Tare reports the indicator's Tare lamp bit. Only populated by
-	// Format22Byte.
+	// Tare reports the indicator's Tare lamp bit. Same conditions as Hold.
 	Tare bool
-	// AtZero reports the indicator's Zero-point lamp bit. Only
-	// populated by Format22Byte.
+	// AtZero reports the indicator's Zero-point lamp bit. Same conditions
+	// as Hold.
 	AtZero bool
-	// DeviceID is the indicator's F26 device ID as sent in the frame, or
-	// -1 if the active FrameFormat doesn't carry one. Format22Byte also
-	// falls back to -1 if its device-ID sub-field doesn't parse as ASCII
-	// decimal and no plausible raw-binary reading can be recovered from it
-	// either (some real-world firmware sends this field as raw binary
-	// instead of ASCII — see Format22Byte); the rest of the Reading is
-	// still populated normally in either case.
+	// DeviceID is the indicator's F26 device ID as sent in the frame (one
+	// raw binary byte in Format22Byte), or -1 if the active FrameFormat
+	// doesn't carry one. Format22Byte also gives -1 for a byte above 99,
+	// F26's maximum; the rest of the Reading is still populated.
 	DeviceID int
-	// Raw is the frame text (with any trailing CR/LF stripped) that
-	// produced this Reading, kept around for logging/debugging.
+	// Raw is the frame (with any trailing CR/LF stripped) that produced
+	// this Reading, kept around for logging/debugging. In Format22Byte it
+	// holds the binary device-ID and lamp bytes as received, so it is not
+	// necessarily valid UTF-8.
 	Raw string
 }

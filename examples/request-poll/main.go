@@ -1,7 +1,7 @@
 // Command request-poll polls a CAS CI-200-series indicator for one weight
 // frame at a fixed interval, using Client.RequestOne. It expects the
-// indicator's Set Mode F31 (or F35, for COM2) to be set to 3 ("send upon
-// data request").
+// indicator's Set Mode F31 to be set to 3 ("send upon data request"), so
+// it must be on COM1: COM2's F35 has no request mode.
 //
 // Environment variables:
 //

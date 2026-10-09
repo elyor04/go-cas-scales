@@ -9,7 +9,7 @@ import (
 
 func TestStreamDeliversFramesUntilInputExhausted(t *testing.T) {
 	c, port := newTestClient(DialOptions{})
-	frame := "ST,GS,01,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg\r\n"
+	frame := cas22("ST", "GS", 1, lamp22(false, false, false), "000013.5", "kg") + "\r\n"
 	port.feed(frame + frame + frame)
 
 	readings, errs := c.Stream(context.Background())
@@ -26,6 +26,37 @@ func TestStreamDeliversFramesUntilInputExhausted(t *testing.T) {
 	}
 	if got != 3 {
 		t.Errorf("got %d readings, want 3", got)
+	}
+}
+
+func TestStreamSplitsFramesWithBinaryDeviceIDs(t *testing.T) {
+	// 10 = LF, 13 = CR, 44 = ','. Each must stay inside its own frame.
+	c, port := newTestClient(DialOptions{})
+	ids := []byte{10, 13, 44}
+	for _, id := range ids {
+		port.feed(cas22("ST", "GS", id, lamp22(false, false, true), "000013.5", "kg") + "\r\n")
+	}
+	port.feed(string(realCI200AEmptyStable))
+
+	readings, errs := c.Stream(context.Background())
+
+	var got []Reading
+	for r := range readings {
+		got = append(got, r)
+	}
+	for err := range errs {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(got) != len(ids)+1 {
+		t.Fatalf("got %d readings, want %d", len(got), len(ids)+1)
+	}
+	for i, id := range ids {
+		if got[i].DeviceID != int(id) || got[i].Value != 13.5 || !got[i].AtZero {
+			t.Errorf("frame %d: %+v, want DeviceID=%d Value=13.5 AtZero", i, got[i], id)
+		}
+	}
+	if last := got[len(ids)]; last.DeviceID != 0 || last.Value != 0 || !last.AtZero || !last.Stable {
+		t.Errorf("real hardware frame: %+v, want DeviceID=0 Value=0 AtZero Stable", last)
 	}
 }
 
@@ -58,7 +89,7 @@ func TestStreamInvalidFrameReportedOnErrorChannel(t *testing.T) {
 // with -race; a bare `go test` will not reliably catch either bug.
 func TestStreamCloseDoesNotPanicOrRace(t *testing.T) {
 	c, port := newTestClient(DialOptions{})
-	frame := "ST,GS,01,000013.5" + string([]byte{lamp22(false, false, false)}) + "kg\r\n"
+	frame := cas22("ST", "GS", 1, lamp22(false, false, false), "000013.5", "kg") + "\r\n"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -58,7 +58,8 @@ func (s *streamSession) deliverErr(err error) {
 }
 
 // splitCRLF is a bufio.SplitFunc that tokenizes on the CR LF sequence every
-// documented CAS frame format is terminated with.
+// documented CAS frame format is terminated with. The pair, not a lone LF:
+// see readCRLF for why Format22Byte's binary device ID needs that.
 func splitCRLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil

@@ -26,24 +26,42 @@ type FrameFormat struct {
 // F30/F34 = 0. This is the default and the only format that carries a
 // device ID and the Hold/Tare/Zero lamp bits.
 //
-// Wire layout (after the CR/LF that terminates every frame is stripped):
+// Wire layout (after the CR/LF that terminates every frame is stripped),
+// by byte offset:
 //
-//	<US|ST|OL>(2) "," <GS|NT>(2) "," <deviceID>(2) "," <weight>(8) <lampByte>(1) <unit>(2)
+//	0-1   <US|ST|OL>   status
+//	2     ","
+//	3-4   <GS|NT>      weight type
+//	5     ","
+//	6     device ID    one raw binary byte, the F26 value (device 12 = 0x0C)
+//	7     lamp byte    see below
+//	8     ","
+//	9-16  weight       8 ASCII bytes
+//	17    " "          the manual's "Empty" byte
+//	18-19 unit         "kg" or "t "
 //
-// The weight field is 8 ASCII bytes that already include the decimal point
-// and, for negative readings, a leading '-' (e.g. "13.5" kg is sent as
-// "000013.5" — see the manual's own worked example), so it can be handed
-// straight to strconv.ParseFloat once trimmed.
+// Captured from a real CI-200A (device 00, empty platform, stable):
 //
-// The device ID sub-field is documented as 2 bytes but real hardware has
-// been observed sending it as raw binary rather than 2 ASCII digits (see
-// Reading.DeviceID); when that happens DeviceID recovers a best-effort
-// value from the raw byte if it's plausible, or -1 otherwise, while Value,
-// Unit, Stable, Net, and the lamp bits are still populated normally either
-// way.
+//	53 54 2C 47 53 2C 00 C5 2C 20 20 20 20 20 30 2E 30 20 6B 67 0D 0A
+//	S  T  ,  G  S  ,  id lamp ,  .  .  .  .  .  0  .  0     k  g  CR LF
+//
+// The device ID and the lamp byte are binary, so the frame is decoded by
+// position rather than by splitting on commas: device 44 is sent as 0x2C,
+// which is itself a comma.
+//
+// The lamp byte is, from bit 7 down: 1 (fixed), Stable, 0 (fixed), Hold,
+// Printer, Gross, Tare, Zero point (0xC5 above = fixed + Stable + Gross +
+// Zero). Hold, Tare and AtZero are read from it; Stable and Net come from
+// the text fields. A byte whose fixed bits are wrong is not trusted, and
+// Hold/Tare/AtZero are then left false.
+//
+// The weight field already includes the decimal point and, for negative
+// readings, a leading '-'. The manual's example pads it with zeros (13.5 kg
+// as "000013.5"); the hardware above pads it with spaces ("     0.0").
+// Either is handed to strconv.ParseFloat once trimmed.
 const (
 	name22Byte = "22-byte CAS"
-	minLen22   = 20 // 2+1+2+1+2+1+8+1+2, i.e. the frame minus its CR/LF
+	minLen22   = 20 // 2+1+2+1+1+1+1+8+1+2, i.e. the frame minus its CR/LF
 
 	name10Byte = "10-byte CAS"
 	minLen10   = 8
@@ -92,17 +110,15 @@ func parseCAS22(raw []byte) (Reading, error) {
 			name22Byte, ErrShortFrame, len(content), minLen22, content)
 	}
 
-	parts := strings.SplitN(content, ",", 4)
-	if len(parts) != 4 {
-		return Reading{}, fmt.Errorf("%s: expected 4 comma-separated fields, got %d: %q", name22Byte, len(parts), content)
+	if len(content) != minLen22 {
+		return Reading{}, fmt.Errorf("%s: expected %d bytes, got %d: %q", name22Byte, minLen22, len(content), content)
 	}
-	status, wtype, idStr, rest := parts[0], parts[1], parts[2], parts[3]
-	if len(status) != 2 || len(wtype) != 2 || len(idStr) != 2 {
-		return Reading{}, fmt.Errorf("%s: malformed status/type/device-id fields: %q", name22Byte, content)
+	if content[2] != ',' || content[5] != ',' || content[8] != ',' {
+		return Reading{}, fmt.Errorf("%s: no separator at byte 2, 5 or 8: %q", name22Byte, content)
 	}
-	if len(rest) != 11 {
-		return Reading{}, fmt.Errorf("%s: expected 11 bytes after device ID (weight+lamp+unit), got %d: %q", name22Byte, len(rest), content)
-	}
+	status, wtype := content[0:2], content[3:5]
+	idByte, lampByte := content[6], content[7]
+	weightStr, unit := content[9:17], content[18:20]
 
 	r := Reading{Raw: content}
 
@@ -126,29 +142,14 @@ func parseCAS22(raw []byte) (Reading, error) {
 		return Reading{}, fmt.Errorf("%s: unexpected weight-type field %q", name22Byte, wtype)
 	}
 
-	// Real-hardware testing found at least one CI-200A that sends this
-	// field as raw binary rather than the 2 ASCII digits the manual's
-	// byte-count implies: the first byte tracked F26 exactly across every
-	// value tried (e.g. device 12 as the single byte 0x0C), while the
-	// second appeared to carry unrelated status-like information rather
-	// than being part of the ID. If the field doesn't parse as ASCII
-	// decimal, fall back to that raw-binary reading of the first byte when
-	// it falls within F26's documented 00-99 range — otherwise it's more
-	// likely line noise than a real ID, so DeviceID degrades to the same
-	// -1 sentinel used when a format carries no device ID at all. Either
-	// way the rest of an otherwise fully decodable Reading isn't discarded
-	// over this secondary field.
-	id, err := strconv.Atoi(idStr)
-	switch {
-	case err == nil:
-		r.DeviceID = id
-	case int(idStr[0]) <= 99:
-		r.DeviceID = int(idStr[0])
-	default:
-		r.DeviceID = -1
+	// F26 only goes to 99; a byte above that is line noise rather than an
+	// ID, and DeviceID degrades to the -1 used when a format has no ID.
+	// The rest of the frame still decodes.
+	r.DeviceID = -1
+	if idByte <= 99 {
+		r.DeviceID = int(idByte)
 	}
 
-	weightStr, lampByte, unit := rest[0:8], rest[8], rest[9:11]
 	v, err := strconv.ParseFloat(strings.TrimSpace(weightStr), 64)
 	if err != nil {
 		return Reading{}, fmt.Errorf("%s: weight field %q: %w", name22Byte, weightStr, err)
@@ -156,16 +157,23 @@ func parseCAS22(raw []byte) (Reading, error) {
 	r.Value = v
 	r.Unit = strings.TrimSpace(unit)
 
-	// Lamp status byte: bit7=1 (fixed), bit6=Stable, bit5=0 (fixed),
-	// bit4=Hold, bit3=Printer, bit2=Gross, bit1=Tare, bit0=ZeroPoint.
-	// Stable/Gross are already derived from the text fields above, which
-	// are treated as authoritative; only the bits with no other
-	// representation are read from the lamp byte.
-	r.Hold = lampByte&(1<<4) != 0
-	r.Tare = lampByte&(1<<1) != 0
-	r.AtZero = lampByte&(1<<0) != 0
+	// Stable and Gross are also in the lamp byte, but the text fields above
+	// are authoritative for those; only the bits with no other
+	// representation are read here.
+	if lampByteValid(lampByte) {
+		r.Hold = lampByte&(1<<4) != 0
+		r.Tare = lampByte&(1<<1) != 0
+		r.AtZero = lampByte&(1<<0) != 0
+	}
 
 	return r, nil
+}
+
+// lampByteValid reports whether b has the lamp byte's two fixed bits as the
+// manual documents them: bit 7 set and bit 5 clear. Anything else means the
+// byte at that position isn't a lamp byte, and its other bits mean nothing.
+func lampByteValid(b byte) bool {
+	return b&(1<<7) != 0 && b&(1<<5) == 0
 }
 
 func parseCAS10(raw []byte) (Reading, error) {

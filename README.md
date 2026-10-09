@@ -42,17 +42,42 @@ The indicator's Set Mode exposes the function codes that matter here:
 | F27 | Parity: 0 = 8N1 (default), 1 = 7E1, 2 = 7O1 — `cas.NoParity` / `cas.EvenParity` / `cas.OddParity` |
 | F28 / F32 | Baud rate for COM1 / COM2 (default 9600) |
 | F30 / F34 | Frame format for COM1 / COM2: 0 = 22-byte CAS, 1 = 10-byte CAS, 2 = 18-byte AND |
-| F31 / F35 | Output mode for COM1 / COM2: 0 = off, 1 = stream always, 2 = stream when stable, 3 = send on request, 4 = command mode (COM1 only) |
+| F31 / F35 | Output mode for COM1 / COM2: 0 = off, 1 = stream always, 2 = stream when stable; COM1 only (F31): 3 = send on request, 4 = command mode |
 
 This package maps onto those modes as:
 
 - **`Client.Stream`** — F31/F35 = 1 or 2. The indicator pushes frames on
   its own; this only reads.
-- **`Client.RequestOne`** — F31/F35 = 3. Writes one raw byte (the device
-  ID) to trigger a single frame.
+- **`Client.RequestOne`** — F31 = 3, COM1 only. Writes one raw byte (the
+  device ID) to trigger a single frame.
 - **`Client.Zero` / `Gross` / `Net` / `Hold` / `Print` / `TotalPrint` /
-  `RequestWeight` / `KeyTareValue` / `HighLimit` / `LowLimit` /
-  `SendCommand`** — F31/F35 = 4, COM1 only. ASCII request/response framing.
+  `RequestWeight` / `SetKeyTareValue` / `SetHighLimit` / `SetLowLimit` /
+  `SendCommand`** — F31 = 4, COM1 only. ASCII request/response framing.
+
+## The 22-byte frame
+
+The default format (F30/F34 = 0), from the manual's §11-3-1 diagram and
+confirmed byte for byte against a real CI-200A (device 00, empty platform):
+
+```
+53 54 2C 47 53 2C 00 C5 2C 20 20 20 20 20 30 2E 30 20 6B 67 0D 0A
+S  T  ,  G  S  ,  id lamp ,  <-- weight, 8 bytes -->  sp k  g  CR LF
+```
+
+The device ID is **one raw binary byte** (the F26 value: device 12 is
+`0x0C`), immediately followed by the **lamp byte**: bit 7 = 1 (fixed),
+6 = Stable, 5 = 0 (fixed), 4 = Hold, 3 = Printer, 2 = Gross, 1 = Tare,
+0 = Zero point (`0xC5` = fixed + Stable + Gross + Zero). A space separates
+the weight from the unit. `Reading.Hold`/`Tare`/`AtZero` come from the lamp
+byte, and stay false if its fixed bits are wrong.
+
+Because the ID is binary, frames are decoded by position, never by
+splitting on commas (device 44 is `0x2C`, a comma), and lines are ended
+only by the CR LF pair (device 10 is `0x0A`, a bare LF).
+
+Versions before 1.2.0 assumed a 2-byte ID and read the lamp byte from the
+space before the unit, so Hold/Tare/AtZero were always false on real
+hardware.
 
 `DefaultOptions` returns a `DialOptions` matching a CI-200A's factory
 defaults (9600 8N1, 22-byte CAS frame, device 0); override fields for a
@@ -86,13 +111,13 @@ port, even though the call that gave up on it returned promptly.
 ## Notes worth reading before wiring this up
 
 - **The on-request byte and the command-mode frame are not the same
-  thing.** `RequestOne` (F31/F35=3) sends the device ID as a single raw
-  *binary* byte (device 10 → byte `0x0A`). The command methods (F31/F35=4)
+  thing.** `RequestOne` (F31=3) sends the device ID as a single raw
+  *binary* byte (device 10 → byte `0x0A`). The command methods (F31=4)
   send an ASCII frame, `D` + 2-digit device ID + code + `CR LF` (device 11's
   zero command is literally the bytes `44 31 31 4B 5A 0D 0A`, straight from
   the manual). Mixing these up will just get you garbage back.
-- **`HighLimit`/`LowLimit` are LCD/SC-only**, per the manual — calling them
-  against a `ModelCI200A`/`ModelCI200S` client returns
+- **`SetHighLimit`/`SetLowLimit` are LCD/SC-only**, per the manual — calling
+  them against a `ModelCI200A`/`ModelCI200S` client returns
   `ErrUnsupportedByModel` without touching the wire.
 - **The manual lists a `KT` command code as "Zero Point Key,"** with a
   description identical to `KZ`. That reads like a documentation error, so
@@ -105,20 +130,17 @@ port, even though the call that gave up on it returned promptly.
   scheme rather than what CI-200 firmware actually speaks, so it isn't
   implemented — but it's worth trying via `SendCommand` if the primary
   framing doesn't get a response from your hardware.
-- **The read-value commands' response format isn't fully specified.** The
-  manual only says "Received Data Return" for every command-mode code, with
-  no exact byte layout given for `HI`/`HL`/`ID`/`HY` distinct from a normal
-  weight frame. `KeyTareValue`/`HighLimit`/`LowLimit` cope by extracting the
-  trailing numeric run from whatever comes back — verify this against real
-  hardware before depending on it.
-- **`Format22Byte`'s device-ID sub-field has been observed as raw binary on
-  real hardware**, not the 2 ASCII digits the manual's byte-count implies —
-  confirmed against a physical CI-200A, where the first byte tracked F26
-  exactly (e.g. device 12 as `0x0C`). `Reading.DeviceID` recovers a
-  best-effort value from that raw byte when it's a plausible F26 value
-  (00-99), or -1 otherwise; `Value`/`Unit`/`Stable`/`Net`/lamp bits decode
-  normally either way. This was seen on one unit, not verified across the
-  whole CI-200 line — worth confirming against your own hardware.
+- **The key tare and the limits can be set but not read.** The manual gives
+  `HY`/`HI`/`HL` (and `ID`) a 5-digit value field and documents every reply
+  only as "Received Data Return", an echo. Sending `HY00000` to "read" the
+  key tare is the same bytes as setting it to 0. `KeyTareValue`, `HighLimit`
+  and `LowLimit` did exactly that before 1.2.0; they are now deprecated and
+  return `ErrNoReadCommand` without touching the wire. The 5-digit encoding
+  the setters use (the value rounded to whole units) isn't fully specified
+  either — verify it on real hardware for non-integer values.
+- **The manual has a few typos worth knowing about**: §11-3-1 says "F30 and
+  F35" for the output mode where it means F31/F35, and the F47/F48 tables
+  are labelled "F45".
 
 ## Package layout
 
